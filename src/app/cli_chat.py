@@ -81,7 +81,8 @@ def chat_loop() -> None:
     if store.row_count() == 0:
         print("[WARN] Vector store is empty. Run /rebuild to create index.")
 
-    print("\nRAG chat started. Commands: /rebuild /reset /exit")
+    print("\nRAG chat started. Commands: /rebuild /reset /tools /memory /exit")
+    print(f"[Agent] Registered tools: {', '.join(agent.available_tools())}")
     history: list[dict[str, str]] = []
 
     while True:
@@ -98,7 +99,14 @@ def chat_loop() -> None:
             break
         if user_text.lower() == "/reset":
             history = []
+            agent.reset_memory()
             print("[INFO] Conversation reset")
+            continue
+        if user_text.lower() == "/tools":
+            print(f"[INFO] Tools: {', '.join(agent.available_tools())}")
+            continue
+        if user_text.lower() == "/memory":
+            print(f"[INFO] Memory: {agent.memory.summarize()}")
             continue
         if user_text.lower() == "/rebuild":
             _build_index(indexer, config.raw_data_dir, config.processed_data_dir)

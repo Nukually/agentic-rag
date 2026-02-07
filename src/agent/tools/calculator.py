@@ -31,14 +31,26 @@ class SafeCalculator:
         ast.FloorDiv,
     )
 
-    def evaluate(self, expression: str, context_text: str = "") -> CalcResult:
+    def evaluate(
+        self,
+        expression: str,
+        context_text: str = "",
+        additional_variables: dict[str, float] | None = None,
+    ) -> CalcResult:
         normalized = " ".join(expression.strip().split())
         if not normalized:
             raise ValueError("empty expression")
 
         variables = self.extract_variables(context_text)
+        if additional_variables:
+            for key, value in additional_variables.items():
+                try:
+                    variables[str(key)] = float(value)
+                except (TypeError, ValueError):
+                    continue
+
         value = self._eval_ast(normalized, variables)
-        return CalcResult(expression=normalized, value=float(value), variables=variables)
+        return CalcResult(expression=normalized, value=float(value), variables=dict(variables))
 
     @staticmethod
     def extract_variables(text: str) -> dict[str, float]:

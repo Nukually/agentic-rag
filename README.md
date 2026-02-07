@@ -5,6 +5,8 @@
 - 向量检索 + reranker 重排
 - 命令行对话问答（带引用）
 - Agentic 工具链（`retrieve -> calculate`）与轨迹输出
+- 多轮 memory 追问（第二轮可复用第一轮工具结果）
+- 工具注册机制（可扩展 `web_search/sql/file`）
 
 ## 当前已实现
 
@@ -15,6 +17,13 @@
 - 已接工具：
   - `retrieve`：检索知识库
   - `calculate`：基于检索到的变量做安全表达式计算
+- 记忆能力：
+  - 记住上轮计算结果（`LAST_RESULT`）
+  - 记住已提取变量（如 `Q1_PROFIT`）
+  - 追问时可直接复用 memory，避免重复检索
+- 工具机制：
+  - 通过 `ToolRegistry` 注册工具
+  - Agent 按规划步骤动态调用工具
 
 ## 快速开始
 
@@ -85,7 +94,21 @@ python3 -m src.app.cli_chat --rebuild-index
 对话命令：
 - `/rebuild`
 - `/reset`
+- `/tools`（查看已注册工具）
+- `/memory`（查看当前 memory 摘要）
 - `/exit`
+
+### D. Streamlit 网页端（简洁 UI）
+
+```bash
+streamlit run src/app/streamlit_chat.py
+```
+
+网页端能力：
+- 多轮聊天（复用同一个 Agent memory）
+- 一键重建索引
+- 会话清空 / memory 重置
+- 每轮可展开查看工具轨迹、引用、memory 摘要
 
 ## 怎么触发 Agentic
 
@@ -103,6 +126,42 @@ python3 -m src.app.cli_chat --rebuild-index
 - `tool=retrieve`
 - `tool=calculate`
 
+## 多轮追问示例（memory 驱动）
+
+第一轮：
+
+```text
+请根据 AGENTIC-CASE-ALPHA-OPS-2049 文档，计算 Q1_PROFIT + Q2_PROFIT - RD_COST
+```
+
+第二轮追问：
+
+```text
+把刚才结果再加 10
+```
+
+你会看到第二轮轨迹通常是：
+- `tool=calculate`
+- 输入表达式变成 `LAST_RESULT + 10`
+
+说明 Agent 已复用上一轮结果，不需要再次检索。
+
+## 工具注册机制（扩展入口）
+
+核心结构：
+- `src/agent/tools/registry.py`
+- `ToolRegistry.register(tool)`
+- 工具实现约定：提供 `name` 和 `run(tool_input, context) -> ToolOutput`
+
+当前默认注册工具在：
+- `src/agent/graph.py` 中 `AgentExecutor.__init__`
+
+已实现工具：
+- `src/agent/tools/retrieve_tool.py`
+- `src/agent/tools/calculate_tool.py`
+
+后续新增 `web_search/sql/file` 时，直接新增工具类并在 registry 注册即可。
+
 ## 测试
 
 单元测试（包含 agentic 流程测试）：
@@ -114,9 +173,13 @@ python3 -m unittest tests/test_agentic_executor.py -v
 ## 关键文件
 
 - Agent 执行器：`src/agent/graph.py`
+- Memory：`src/agent/memory.py`
 - Planner：`src/agent/planner.py`
 - Calculator 工具：`src/agent/tools/calculator.py`
+- Tool Registry：`src/agent/tools/registry.py`
 - 检索工具：`src/agent/tools/rag_retrieve.py`
+- Retrieve Tool：`src/agent/tools/retrieve_tool.py`
+- Calculate Tool：`src/agent/tools/calculate_tool.py`
 - CLI：`src/app/cli_chat.py`
 - Agentic 演示脚本：`scripts/agentic_query_once.py`
 - 测试样例文档：`knowledge/agentic_test_case.md`

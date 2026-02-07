@@ -3,9 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable
 
-from src.agent.planner import AgentPlanner, PlannedStep
-from src.agent.tools.calculator import CalcResult, SafeCalculator
-from src.agent.tools.rag_retrieve import RetrievalResult, RetrievedHit, retrieve_hits
+from src.agent.memory import AgentMemory
+from src.agent.planner import AgentPlanner
+from src.agent.tools.rag_retrieve import RetrievalResult, RetrievedHit
+from src.agent.tools.registry import ToolContext, ToolRegistry
+from src.agent.tools.retrieve_tool import RetrieveTool
+from src.agent.tools.calculate_tool import CalculateTool
 from src.llm.client import OpenAIClientBundle
 from src.llm.prompts import AGENT_FINAL_SYSTEM_PROMPT, build_agent_answer_prompt
 from src.retrieval.reranker import OpenAIStyleReranker
@@ -28,6 +31,7 @@ class AgentResult:
     traces: list[AgentTraceStep]
     reranker_applied: bool
     reranker_message: str
+    memory_summary: str
 
 
 class AgentExecutor:
@@ -41,6 +45,7 @@ class AgentExecutor:
         planner: AgentPlanner | None = None,
         answer_fn: Callable[[str, list[RetrievedHit], list[AgentTraceStep], list[dict[str, str]]], str] | None = None,
         retrieve_fn: Callable[[str], RetrievalResult] | None = None,
+        registry: ToolRegistry | None = None,
     ) -> None:
         self.llm_clients = llm_clients
         self.vector_store = vector_store
@@ -48,91 +53,101 @@ class AgentExecutor:
         self.top_k = top_k
         self.candidate_k = candidate_k
         self.planner = planner or AgentPlanner(llm_clients=llm_clients, max_steps=4)
-        self.calculator = SafeCalculator()
         self.answer_fn = answer_fn
-        self.retrieve_fn = retrieve_fn
+        self.memory = AgentMemory()
+
+        if registry is not None:
+            self.registry = registry
+        else:
+            self.registry = ToolRegistry()
+            self.registry.register(RetrieveTool(retrieve_fn=retrieve_fn))
+            self.registry.register(CalculateTool())
 
     def run(self, question: str, history: list[dict[str, str]] | None = None) -> AgentResult:
         history = history or []
 
-        planned_steps = self.planner.plan(question)
+        planned_steps = self.planner.plan(question=question, memory=self.memory, history=history)
         traces: list[AgentTraceStep] = []
         references: list[RetrievedHit] = []
 
-        reranker_applied = False
-        reranker_message = "no retrieval"
-        retrieval_context_text = ""
+        reranker_applied = self.memory.last_reranker_applied
+        reranker_message = self.memory.last_reranker_message or "no retrieval"
 
+        run_state: dict[str, object] = {}
         for i, step in enumerate(planned_steps, start=1):
-            if step.tool == "retrieve":
-                retrieval = self._retrieve(step.input if step.input != "用户问题" else question)
-                references = self._merge_references(references, retrieval.final_hits)
-                reranker_applied = retrieval.reranker_applied
-                reranker_message = retrieval.reranker_message
-                retrieval_context_text = "\n".join(hit.text for hit in retrieval.final_hits)
-
-                obs = self._format_retrieval_observation(retrieval)
+            if not self.registry.has(step.tool):
                 traces.append(
                     AgentTraceStep(
                         step_no=i,
                         tool=step.tool,
                         tool_input=step.input,
                         reason=step.reason,
-                        observation=obs,
+                        observation=f"tool_not_registered: {step.tool}",
                     )
                 )
                 continue
 
-            if step.tool == "calculate":
-                try:
-                    calc = self.calculator.evaluate(step.input, retrieval_context_text)
-                    obs = self._format_calc_observation(calc)
-                except Exception as exc:
-                    obs = f"calc_failed: {exc}"
+            tool_output = self.registry.run(
+                name=step.tool,
+                tool_input=step.input,
+                context=ToolContext(
+                    question=question,
+                    history=history,
+                    memory=self.memory,
+                    run_state=run_state,
+                    llm_clients=self.llm_clients,
+                    vector_store=self.vector_store,
+                    reranker=self.reranker,
+                    top_k=self.top_k,
+                    candidate_k=self.candidate_k,
+                ),
+            )
 
-                traces.append(
-                    AgentTraceStep(
-                        step_no=i,
-                        tool=step.tool,
-                        tool_input=step.input,
-                        reason=step.reason,
-                        observation=obs,
-                    )
+            traces.append(
+                AgentTraceStep(
+                    step_no=i,
+                    tool=step.tool,
+                    tool_input=step.input,
+                    reason=step.reason,
+                    observation=tool_output.observation,
                 )
-                continue
+            )
 
-            if step.tool == "finish":
-                traces.append(
-                    AgentTraceStep(
-                        step_no=i,
-                        tool=step.tool,
-                        tool_input=step.input,
-                        reason=step.reason,
-                        observation="finish requested by planner",
-                    )
-                )
-                break
+            references = self._merge_references(references, tool_output.references)
+            self.memory.apply_delta(tool_output.memory_delta)
 
-        answer = self._answer(question, references, traces, history)
+            if "retrieval_text" in tool_output.metadata:
+                run_state["latest_retrieval_text"] = tool_output.metadata["retrieval_text"]
+            if "reranker_applied" in tool_output.metadata:
+                reranker_applied = bool(tool_output.metadata["reranker_applied"])
+            if "reranker_message" in tool_output.metadata:
+                reranker_message = str(tool_output.metadata["reranker_message"])
+
+        if not references and self.memory.last_references:
+            references = list(self.memory.last_references)
+
+        answer = self._answer(question=question, references=references, traces=traces, history=history)
+
+        self.memory.turn_count += 1
+        self.memory.last_question = question
+        self.memory.last_answer = answer
+        if references:
+            self.memory.last_references = list(references)
+
         return AgentResult(
             answer=answer,
             references=references,
             traces=traces,
             reranker_applied=reranker_applied,
             reranker_message=reranker_message,
+            memory_summary=self.memory.summarize(),
         )
 
-    def _retrieve(self, query: str) -> RetrievalResult:
-        if self.retrieve_fn is not None:
-            return self.retrieve_fn(query)
-        return retrieve_hits(
-            query=query,
-            llm_clients=self.llm_clients,
-            vector_store=self.vector_store,
-            reranker=self.reranker,
-            top_k=self.top_k,
-            candidate_k=self.candidate_k,
-        )
+    def reset_memory(self) -> None:
+        self.memory.reset()
+
+    def available_tools(self) -> list[str]:
+        return self.registry.names()
 
     def _answer(
         self,
@@ -169,24 +184,3 @@ class AgentExecutor:
             seen.add(key)
             merged.append(hit)
         return merged
-
-    @staticmethod
-    def _format_retrieval_observation(retrieval: RetrievalResult) -> str:
-        if not retrieval.final_hits:
-            return "no hits"
-        parts: list[str] = []
-        for i, hit in enumerate(retrieval.final_hits, start=1):
-            score = hit.rerank_score if hit.rerank_score is not None else hit.vector_score
-            score_name = "r_score" if hit.rerank_score is not None else "v_score"
-            snippet = " ".join(hit.text.split())[:120]
-            parts.append(
-                f"[{i}] {hit.source} page={hit.page} {score_name}={score:.4f} text={snippet}"
-            )
-        return "\n".join(parts)
-
-    @staticmethod
-    def _format_calc_observation(calc: CalcResult) -> str:
-        var_text = ", ".join(f"{k}={v}" for k, v in sorted(calc.variables.items()))
-        if not var_text:
-            var_text = "<no vars>"
-        return f"expression={calc.expression}; value={calc.value}; vars={var_text}"

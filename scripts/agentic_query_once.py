@@ -56,6 +56,7 @@ def main() -> None:
     )
 
     print(f"\nQuestion: {args.question}\n")
+    print(f"[INFO] Registered tools: {', '.join(agent.available_tools())}\n")
     result = agent.run(args.question)
 
     print("=== Agent Trace ===")
@@ -75,6 +76,9 @@ def main() -> None:
         score = hit.rerank_score if hit.rerank_score is not None else hit.vector_score
         score_name = "r_score" if hit.rerank_score is not None else "v_score"
         print(f"[ref:{i}] {hit.source} page={hit.page} {score_name}={score:.4f}")
+
+    print("\n=== Memory Summary ===")
+    print(result.memory_summary)
 
 
 if __name__ == "__main__":

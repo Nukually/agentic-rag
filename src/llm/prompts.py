@@ -42,9 +42,27 @@ def build_user_prompt(question: str, contexts: list[dict[str, str]]) -> str:
     )
 
 
-def build_agent_plan_prompt(question: str, max_steps: int) -> str:
+def build_agent_plan_prompt(
+    question: str,
+    max_steps: int,
+    memory_summary: str = "<none>",
+    recent_history: list[dict[str, str]] | None = None,
+) -> str:
+    recent_history = recent_history or []
+    if not recent_history:
+        history_text = "<none>"
+    else:
+        lines: list[str] = []
+        for item in recent_history:
+            role = item.get("role", "unknown")
+            content = item.get("content", "")
+            lines.append(f"{role}: {content}")
+        history_text = "\n".join(lines)
+
     return (
         f"用户问题：{question}\n\n"
+        f"记忆摘要：{memory_summary}\n\n"
+        f"最近对话：\n{history_text}\n\n"
         f"请输出不超过 {max_steps} 步的工具计划，仅 JSON。"
     )
 

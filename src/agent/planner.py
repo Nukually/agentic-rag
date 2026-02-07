@@ -4,6 +4,7 @@ import json
 import re
 from dataclasses import dataclass
 
+from src.agent.memory import AgentMemory
 from src.llm.client import OpenAIClientBundle
 from src.llm.prompts import AGENT_PLANNER_SYSTEM_PROMPT, build_agent_plan_prompt
 
@@ -20,34 +21,72 @@ class AgentPlanner:
         self.llm_clients = llm_clients
         self.max_steps = max_steps
 
-    def plan(self, question: str) -> list[PlannedStep]:
-        heuristic_steps = self._heuristic_plan(question)
+    def plan(
+        self,
+        question: str,
+        memory: AgentMemory | None = None,
+        history: list[dict[str, str]] | None = None,
+    ) -> list[PlannedStep]:
+        history = history or []
+        heuristic_steps = self._heuristic_plan(question=question, memory=memory)
         if heuristic_steps:
             return heuristic_steps[: self.max_steps]
 
-        prompt = build_agent_plan_prompt(question=question, max_steps=self.max_steps)
-        raw = self.llm_clients.chat(
-            messages=[
-                {"role": "system", "content": AGENT_PLANNER_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=0.0,
+        prompt = build_agent_plan_prompt(
+            question=question,
+            max_steps=self.max_steps,
+            memory_summary=memory.summarize() if memory is not None else "<none>",
+            recent_history=history[-4:],
         )
-
-        parsed = self._parse_steps(raw)
-        if parsed:
-            return parsed[: self.max_steps]
+        try:
+            raw = self.llm_clients.chat(
+                messages=[
+                    {"role": "system", "content": AGENT_PLANNER_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+            )
+            parsed = self._parse_steps(raw, memory=memory)
+            if parsed:
+                return parsed[: self.max_steps]
+        except Exception:
+            pass
 
         return [PlannedStep(tool="retrieve", input=question, reason="fallback retrieve")]
 
-    def _heuristic_plan(self, question: str) -> list[PlannedStep]:
+    def _heuristic_plan(self, question: str, memory: AgentMemory | None) -> list[PlannedStep]:
         expr = self._extract_symbolic_expression(question)
         if expr:
+            vars_in_expr = self._extract_variable_tokens(expr)
+            if memory and vars_in_expr and all(v in memory.variables for v in vars_in_expr):
+                return [
+                    PlannedStep(tool="calculate", input=expr, reason="reuse variables from memory"),
+                ]
+
             return [
                 PlannedStep(tool="retrieve", input=question, reason="collect variable values from docs"),
                 PlannedStep(tool="calculate", input=expr, reason="evaluate requested expression"),
             ]
+
+        followup_expr = self._extract_followup_expression(question=question, memory=memory)
+        if followup_expr:
+            return [
+                PlannedStep(tool="calculate", input=followup_expr, reason="reuse LAST_RESULT from memory"),
+            ]
+
         return []
+
+    @staticmethod
+    def _extract_variable_tokens(expression: str) -> list[str]:
+        names = re.findall(r"\b([A-Z_][A-Z0-9_]*)\b", expression)
+        unique: list[str] = []
+        seen: set[str] = set()
+        for item in names:
+            if item in seen:
+                continue
+            seen.add(item)
+            unique.append(item)
+        return unique
 
     @staticmethod
     def _extract_symbolic_expression(question: str) -> str | None:
@@ -64,7 +103,35 @@ class AgentPlanner:
                 return expr
         return None
 
-    def _parse_steps(self, raw: str) -> list[PlannedStep]:
+    @staticmethod
+    def _extract_followup_expression(question: str, memory: AgentMemory | None) -> str | None:
+        if memory is None or memory.last_calc_value is None:
+            return None
+
+        q = " ".join(question.strip().split())
+        has_followup_hint = bool(
+            re.search(r"(刚才|上次|上一步|之前|那个结果|这个结果|上个结果|再)" , q)
+        )
+        if not has_followup_hint:
+            return None
+
+        patterns: list[tuple[str, str]] = [
+            (r"(?:再|然后)?加(?:上)?\s*(-?\d+(?:\.\d+)?)", "+"),
+            (r"(?:再|然后)?减(?:去)?\s*(-?\d+(?:\.\d+)?)", "-"),
+            (r"(?:再|然后)?乘(?:以|上)?\s*(-?\d+(?:\.\d+)?)", "*"),
+            (r"(?:再|然后)?除(?:以)?\s*(-?\d+(?:\.\d+)?)", "/"),
+        ]
+
+        for pattern, op in patterns:
+            m = re.search(pattern, q)
+            if not m:
+                continue
+            number = m.group(1)
+            return f"LAST_RESULT {op} {number}"
+
+        return None
+
+    def _parse_steps(self, raw: str, memory: AgentMemory | None) -> list[PlannedStep]:
         payload = self._extract_json(raw)
         if payload is None:
             return []
@@ -89,9 +156,10 @@ class AgentPlanner:
         if not out:
             return []
 
-        # Ensure at least one retrieval for knowledge-grounded answering.
-        if not any(step.tool == "retrieve" for step in out):
-            out.insert(0, PlannedStep(tool="retrieve", input="", reason="force grounding"))
+        need_grounding = not any(step.tool == "retrieve" for step in out)
+        has_memory_context = bool(memory and (memory.last_references or memory.variables or memory.last_calc_value is not None))
+        if need_grounding and not has_memory_context:
+            out.insert(0, PlannedStep(tool="retrieve", input="用户问题", reason="force grounding"))
 
         normalized: list[PlannedStep] = []
         for idx, step in enumerate(out):
