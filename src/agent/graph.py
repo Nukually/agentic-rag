@@ -10,7 +10,12 @@ from src.agent.tools.registry import ToolContext, ToolRegistry
 from src.agent.tools.retrieve_tool import RetrieveTool
 from src.agent.tools.calculate_tool import CalculateTool
 from src.llm.client import OpenAIClientBundle
-from src.llm.prompts import AGENT_FINAL_SYSTEM_PROMPT, build_agent_answer_prompt
+from src.llm.prompts import (
+    AGENT_CHITCHAT_SYSTEM_PROMPT,
+    AGENT_FINAL_SYSTEM_PROMPT,
+    AGENT_GENERAL_SYSTEM_PROMPT,
+    build_agent_answer_prompt,
+)
 from src.retrieval.reranker import OpenAIStyleReranker
 from src.retrieval.vector_store import MilvusVectorStore
 
@@ -65,8 +70,13 @@ class AgentExecutor:
 
     def run(self, question: str, history: list[dict[str, str]] | None = None) -> AgentResult:
         history = history or []
-
-        planned_steps = self.planner.plan(question=question, memory=self.memory, history=history)
+        route = self.planner.route_question(question)
+        planned_steps = self.planner.plan(
+            question=question,
+            memory=self.memory,
+            history=history,
+            route=route,
+        )
         traces: list[AgentTraceStep] = []
         references: list[RetrievedHit] = []
 
@@ -126,7 +136,22 @@ class AgentExecutor:
         if not references and self.memory.last_references:
             references = list(self.memory.last_references)
 
-        answer = self._answer(question=question, references=references, traces=traces, history=history)
+        if route == "闲聊":
+            system_prompt = AGENT_CHITCHAT_SYSTEM_PROMPT
+        elif route == "其他":
+            system_prompt = AGENT_GENERAL_SYSTEM_PROMPT
+        elif route is None and not planned_steps:
+            system_prompt = AGENT_GENERAL_SYSTEM_PROMPT
+        else:
+            system_prompt = AGENT_FINAL_SYSTEM_PROMPT
+
+        answer = self._answer(
+            question=question,
+            references=references,
+            traces=traces,
+            history=history,
+            system_prompt=system_prompt,
+        )
 
         self.memory.turn_count += 1
         self.memory.last_question = question
@@ -155,6 +180,7 @@ class AgentExecutor:
         references: list[RetrievedHit],
         traces: list[AgentTraceStep],
         history: list[dict[str, str]],
+        system_prompt: str = AGENT_FINAL_SYSTEM_PROMPT,
     ) -> str:
         if self.answer_fn is not None:
             return self.answer_fn(question, references, traces, history)
@@ -169,7 +195,7 @@ class AgentExecutor:
         ]
 
         user_prompt = build_agent_answer_prompt(question=question, tool_traces=traces, contexts=contexts)
-        messages = [{"role": "system", "content": AGENT_FINAL_SYSTEM_PROMPT}, *history]
+        messages = [{"role": "system", "content": system_prompt}, *history]
         messages.append({"role": "user", "content": user_prompt})
         return self.llm_clients.chat(messages=messages)
 

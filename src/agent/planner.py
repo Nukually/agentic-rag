@@ -6,7 +6,12 @@ from dataclasses import dataclass
 
 from src.agent.memory import AgentMemory
 from src.llm.client import OpenAIClientBundle
-from src.llm.prompts import AGENT_PLANNER_SYSTEM_PROMPT, build_agent_plan_prompt
+from src.llm.prompts import (
+    AGENT_PLANNER_SYSTEM_PROMPT,
+    AGENT_ROUTER_SYSTEM_PROMPT,
+    build_agent_plan_prompt,
+    build_agent_router_prompt,
+)
 
 
 @dataclass(frozen=True)
@@ -26,11 +31,19 @@ class AgentPlanner:
         question: str,
         memory: AgentMemory | None = None,
         history: list[dict[str, str]] | None = None,
+        route: str | None = None,
     ) -> list[PlannedStep]:
         history = history or []
+        route = route or self._route_question(question)
+        if route == "闲聊":
+            return []
         heuristic_steps = self._heuristic_plan(question=question, memory=memory)
         if heuristic_steps:
             return heuristic_steps[: self.max_steps]
+        if route == "其他":
+            return []
+        if route is None and self._should_skip_tools(question):
+            return []
 
         prompt = build_agent_plan_prompt(
             question=question,
@@ -53,6 +66,132 @@ class AgentPlanner:
             pass
 
         return [PlannedStep(tool="retrieve", input=question, reason="fallback retrieve")]
+
+    @staticmethod
+    def _normalize_question(question: str) -> str:
+        return " ".join(question.strip().split())
+
+    def _should_skip_tools(self, question: str) -> bool:
+        q = self._normalize_question(question)
+        if not q:
+            return True
+        if self._has_doc_hints(q):
+            return False
+        if self._is_smalltalk(q):
+            return True
+        token_count = len(re.findall(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]", q))
+        return token_count <= 8
+
+    def _route_question(self, question: str) -> str | None:
+        q = self._normalize_question(question)
+        if not q:
+            return None
+        prompt = build_agent_router_prompt(q)
+        try:
+            raw = self.llm_clients.chat(
+                messages=[
+                    {"role": "system", "content": AGENT_ROUTER_SYSTEM_PROMPT},
+                    {"role": "user", "content": prompt},
+                ],
+                temperature=0.0,
+            )
+        except Exception:
+            return None
+        return self._parse_route(raw)
+
+    @staticmethod
+    def _parse_route(text: str) -> str | None:
+        if not text:
+            return None
+        for label in ("需要查询知识库", "闲聊", "其他"):
+            if label in text:
+                return label
+        return None
+
+    def route_question(self, question: str) -> str | None:
+        return self._route_question(question)
+
+    @staticmethod
+    def _is_smalltalk(question: str) -> bool:
+        normalized = re.sub(r"[^\w\u4e00-\u9fff]+", "", question.lower())
+        if not normalized:
+            return True
+
+        simple = {
+            "hi",
+            "hello",
+            "hey",
+            "sup",
+            "yo",
+            "hola",
+            "thanks",
+            "thx",
+            "你好",
+            "您好",
+            "嗨",
+            "哈喽",
+            "哈囉",
+            "在吗",
+            "在么",
+            "在嘛",
+            "早上好",
+            "下午好",
+            "晚上好",
+            "谢谢",
+            "多谢",
+            "感谢",
+            "再见",
+            "拜拜",
+        }
+        if normalized in simple:
+            return True
+
+        if re.fullmatch(r"(你是谁|你叫什么|你是做什么的|你能做什么|你会什么)", normalized):
+            return True
+
+        return False
+
+    @staticmethod
+    def _has_doc_hints(question: str) -> bool:
+        if AgentPlanner._extract_symbolic_expression(question):
+            return True
+
+        if re.search(r"\b[A-Z_][A-Z0-9_]{2,}\b", question):
+            return True
+
+        if re.search(r"\b[A-Z0-9]{2,}(?:[-_][A-Z0-9]{2,}){1,}\b", question):
+            return True
+
+        if re.search(r"(page\s*\d+|p\.?\s*\d+|第?\s*\d+\s*页)", question, flags=re.IGNORECASE):
+            return True
+
+        keywords = (
+            "文档",
+            "文件",
+            "报告",
+            "pdf",
+            "表",
+            "图",
+            "章节",
+            "附录",
+            "引用",
+            "来源",
+            "根据",
+            "检索",
+            "查找",
+            "搜索",
+            "资料",
+            "数据",
+            "指标",
+            "年报",
+            "公告",
+            "财报",
+            "document",
+            "report",
+            "reference",
+            "cite",
+        )
+        return any(key in question for key in keywords)
 
     def _heuristic_plan(self, question: str, memory: AgentMemory | None) -> list[PlannedStep]:
         expr = self._extract_symbolic_expression(question)
