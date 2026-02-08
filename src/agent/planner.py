@@ -194,6 +194,12 @@ class AgentPlanner:
         return any(key in question for key in keywords)
 
     def _heuristic_plan(self, question: str, memory: AgentMemory | None) -> list[PlannedStep]:
+        if self._is_budget_analysis_request(question):
+            return [
+                PlannedStep(tool="retrieve", input=question, reason="collect annual budget data"),
+                PlannedStep(tool="budget_analyst", input="用户问题", reason="analyze budget-based rating"),
+            ]
+
         expr = self._extract_symbolic_expression(question)
         if expr:
             vars_in_expr = self._extract_variable_tokens(expr)
@@ -214,6 +220,13 @@ class AgentPlanner:
             ]
 
         return []
+
+    @staticmethod
+    def _is_budget_analysis_request(question: str) -> bool:
+        q = question.lower()
+        has_budget = bool(re.search(r"(年度?预算|budget)", q))
+        has_rating = bool(re.search(r"(股价|price|评级|分析师|买入|卖出|增持|减持)", q))
+        return has_budget and has_rating
 
     @staticmethod
     def _extract_variable_tokens(expression: str) -> list[str]:
@@ -284,12 +297,15 @@ class AgentPlanner:
             if not isinstance(item, dict):
                 continue
             tool = str(item.get("tool", "")).strip().lower()
-            if tool not in {"retrieve", "calculate", "finish"}:
+            if tool not in {"retrieve", "calculate", "budget_analyst", "finish"}:
                 continue
             text = str(item.get("input", "")).strip()
             reason = str(item.get("reason", "")).strip()
             if tool != "finish" and not text:
-                continue
+                if tool in {"retrieve", "budget_analyst"}:
+                    text = "用户问题"
+                else:
+                    continue
             out.append(PlannedStep(tool=tool, input=text, reason=reason or ""))
 
         if not out:

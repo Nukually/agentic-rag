@@ -9,6 +9,7 @@ from src.agent.tools.rag_retrieve import RetrievalResult, RetrievedHit
 from src.agent.tools.registry import ToolContext, ToolRegistry
 from src.agent.tools.retrieve_tool import RetrieveTool
 from src.agent.tools.calculate_tool import CalculateTool
+from src.agent.tools.budget_analyst_tool import BudgetAnalystTool
 from src.llm.client import OpenAIClientBundle
 from src.llm.prompts import (
     AGENT_CHITCHAT_SYSTEM_PROMPT,
@@ -67,6 +68,7 @@ class AgentExecutor:
             self.registry = ToolRegistry()
             self.registry.register(RetrieveTool(retrieve_fn=retrieve_fn))
             self.registry.register(CalculateTool())
+            self.registry.register(BudgetAnalystTool())
 
     def run(self, question: str, history: list[dict[str, str]] | None = None) -> AgentResult:
         history = history or []

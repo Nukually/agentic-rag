@@ -6,11 +6,12 @@ RAG_SYSTEM_PROMPT = """你是一个严谨的 RAG 助手。
 
 AGENT_PLANNER_SYSTEM_PROMPT = """你是一个任务规划器。你要把用户问题拆成工具步骤。
 仅输出 JSON，不要输出其他文字。JSON 格式：
-{"steps":[{"tool":"retrieve|calculate|finish","input":"...","reason":"..."}]}
+{"steps":[{"tool":"retrieve|calculate|budget_analyst|finish","input":"...","reason":"..."}]}
 规则：
 1) 需要事实依据时优先 retrieve。
 2) 需要算术计算时使用 calculate，input 必须是可执行表达式（例如 A + B - C 或 12.5*3）。
-3) 步骤总数不超过 4。
+3) 需要基于年度预算分析股价并给出评级时使用 budget_analyst（通常先 retrieve）。
+4) 步骤总数不超过 4。
 """
 
 AGENT_ROUTER_SYSTEM_PROMPT = """你是一个分类助手。
