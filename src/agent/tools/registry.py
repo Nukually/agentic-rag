@@ -8,6 +8,7 @@ from src.agent.tools.rag_retrieve import RetrievedHit
 from src.llm.client import OpenAIClientBundle
 from src.retrieval.reranker import OpenAIStyleReranker
 from src.retrieval.vector_store import MilvusVectorStore
+from src.retrieval.keyword_index import KeywordIndex
 
 
 @dataclass
@@ -20,9 +21,12 @@ class ToolContext:
     llm_clients: OpenAIClientBundle
     vector_store: MilvusVectorStore
     reranker: OpenAIStyleReranker
+    keyword_index: KeywordIndex | None
 
     top_k: int
     candidate_k: int
+    hybrid_vector_weight: float
+    hybrid_keyword_weight: float
 
 
 @dataclass

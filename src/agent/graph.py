@@ -19,6 +19,7 @@ from src.llm.prompts import (
 )
 from src.retrieval.reranker import OpenAIStyleReranker
 from src.retrieval.vector_store import MilvusVectorStore
+from src.retrieval.keyword_index import KeywordIndex
 
 
 @dataclass(frozen=True)
@@ -48,6 +49,9 @@ class AgentExecutor:
         reranker: OpenAIStyleReranker,
         top_k: int,
         candidate_k: int,
+        keyword_index: KeywordIndex | None = None,
+        hybrid_vector_weight: float = 0.6,
+        hybrid_keyword_weight: float = 0.4,
         planner: AgentPlanner | None = None,
         answer_fn: Callable[[str, list[RetrievedHit], list[AgentTraceStep], list[dict[str, str]]], str] | None = None,
         retrieve_fn: Callable[[str], RetrievalResult] | None = None,
@@ -58,6 +62,9 @@ class AgentExecutor:
         self.reranker = reranker
         self.top_k = top_k
         self.candidate_k = candidate_k
+        self.keyword_index = keyword_index
+        self.hybrid_vector_weight = hybrid_vector_weight
+        self.hybrid_keyword_weight = hybrid_keyword_weight
         self.planner = planner or AgentPlanner(llm_clients=llm_clients, max_steps=4)
         self.answer_fn = answer_fn
         self.memory = AgentMemory()
@@ -110,8 +117,11 @@ class AgentExecutor:
                     llm_clients=self.llm_clients,
                     vector_store=self.vector_store,
                     reranker=self.reranker,
+                    keyword_index=self.keyword_index,
                     top_k=self.top_k,
                     candidate_k=self.candidate_k,
+                    hybrid_vector_weight=self.hybrid_vector_weight,
+                    hybrid_keyword_weight=self.hybrid_keyword_weight,
                 ),
             )
 

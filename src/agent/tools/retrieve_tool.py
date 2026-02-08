@@ -27,6 +27,9 @@ class RetrieveTool:
                 reranker=context.reranker,
                 top_k=context.top_k,
                 candidate_k=context.candidate_k,
+                keyword_index=context.keyword_index,
+                vector_weight=context.hybrid_vector_weight,
+                keyword_weight=context.hybrid_keyword_weight,
             )
 
         observation = self._format_observation(retrieval)
@@ -58,7 +61,10 @@ class RetrieveTool:
         lines: list[str] = []
         for i, hit in enumerate(retrieval.final_hits, start=1):
             score = hit.rerank_score if hit.rerank_score is not None else hit.vector_score
-            score_name = "r_score" if hit.rerank_score is not None else "v_score"
+            if hit.rerank_score is not None:
+                score_name = "r_score"
+            else:
+                score_name = "h_score" if retrieval.keyword_hits is not None else "v_score"
             snippet = " ".join(hit.text.split())[:120]
             lines.append(f"[{i}] {hit.source} page={hit.page} {score_name}={score:.4f} text={snippet}")
 

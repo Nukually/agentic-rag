@@ -33,6 +33,8 @@ class AppConfig:
     chunk_overlap: int
     retrieval_top_k: int
     retrieval_candidate_k: int
+    hybrid_vector_weight: float
+    hybrid_keyword_weight: float
 
 
 def _required(name: str) -> str:
@@ -81,4 +83,6 @@ def load_config() -> AppConfig:
         chunk_overlap=_get_int("CHUNK_OVERLAP", 150),
         retrieval_top_k=_get_int("RETRIEVAL_TOP_K", 4),
         retrieval_candidate_k=_get_int("RETRIEVAL_CANDIDATE_K", 12),
+        hybrid_vector_weight=_get_float("HYBRID_VECTOR_WEIGHT", 0.6),
+        hybrid_keyword_weight=_get_float("HYBRID_KEYWORD_WEIGHT", 0.4),
     )

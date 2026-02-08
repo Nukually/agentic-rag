@@ -6,6 +6,7 @@ from src.agent.graph import AgentExecutor
 from src.ingest.pipeline import IngestPipeline
 from src.llm.client import OpenAIClientBundle
 from src.retrieval.index_builder import RAGIndexer
+from src.retrieval.keyword_index import KeywordIndex
 from src.retrieval.reranker import OpenAIStyleReranker
 from src.retrieval.vector_store import MilvusVectorStore
 from src.utils.config import load_config
@@ -59,12 +60,16 @@ def chat_loop() -> None:
     ingest = IngestPipeline(chunk_size=config.chunk_size, chunk_overlap=config.chunk_overlap)
     store = MilvusVectorStore(uri=config.milvus_uri, collection_name=config.milvus_collection)
     indexer = RAGIndexer(ingest_pipeline=ingest, llm_clients=clients, vector_store=store)
+    keyword_index = KeywordIndex.from_processed_dir(config.processed_data_dir)
     agent = AgentExecutor(
         llm_clients=clients,
         vector_store=store,
         reranker=reranker,
         top_k=config.retrieval_top_k,
         candidate_k=config.retrieval_candidate_k,
+        keyword_index=keyword_index,
+        hybrid_vector_weight=config.hybrid_vector_weight,
+        hybrid_keyword_weight=config.hybrid_keyword_weight,
     )
 
     parser = argparse.ArgumentParser(description="Minimal Agentic RAG CLI")
@@ -77,9 +82,13 @@ def chat_loop() -> None:
 
     if args.rebuild_index:
         _build_index(indexer, config.raw_data_dir, config.processed_data_dir)
+        keyword_index = KeywordIndex.from_processed_dir(config.processed_data_dir)
+        agent.keyword_index = keyword_index
 
-    if store.row_count() == 0:
-        print("[WARN] Vector store is empty. Run /rebuild to create index.")
+    if store.row_count() == 0 and keyword_index is None:
+        print("[WARN] No index data. Run /rebuild to create index.")
+    elif store.row_count() == 0:
+        print("[WARN] Vector store is empty. Falling back to keyword retrieval only.")
 
     print("\nRAG chat started. Commands: /rebuild /reset /tools /memory /exit")
     print(f"[Agent] Registered tools: {', '.join(agent.available_tools())}")
@@ -110,9 +119,11 @@ def chat_loop() -> None:
             continue
         if user_text.lower() == "/rebuild":
             _build_index(indexer, config.raw_data_dir, config.processed_data_dir)
+            keyword_index = KeywordIndex.from_processed_dir(config.processed_data_dir)
+            agent.keyword_index = keyword_index
             continue
 
-        if store.row_count() == 0:
+        if store.row_count() == 0 and keyword_index is None:
             print("[WARN] No index data. Run /rebuild first.")
             continue
 
@@ -132,7 +143,10 @@ def chat_loop() -> None:
             print("References:")
             for i, hit in enumerate(result.references, start=1):
                 ref_score = hit.rerank_score if hit.rerank_score is not None else hit.vector_score
-                score_name = "r_score" if hit.rerank_score is not None else "v_score"
+                if hit.rerank_score is not None:
+                    score_name = "r_score"
+                else:
+                    score_name = "h_score" if keyword_index is not None else "v_score"
                 print(f"  [ref:{i}] {hit.source} page={hit.page} {score_name}={ref_score:.4f}")
             print("")
 

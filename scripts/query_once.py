@@ -13,6 +13,7 @@ from src.ingest.pipeline import IngestPipeline
 from src.llm.client import OpenAIClientBundle
 from src.llm.prompts import RAG_SYSTEM_PROMPT, build_user_prompt
 from src.retrieval.index_builder import RAGIndexer
+from src.retrieval.keyword_index import KeywordIndex
 from src.retrieval.reranker import OpenAIStyleReranker
 from src.retrieval.vector_store import MilvusVectorStore
 from src.utils.config import load_config
@@ -35,7 +36,15 @@ def _show_retrieval(result: RetrievalResult) -> None:
             f"    {_snippet(hit.text)}"
         )
 
-    print("\n=== 2) 重排结果 ===")
+    if result.keyword_hits:
+        print("\n=== 2) 关键词召回结果 ===")
+        for i, hit in enumerate(result.keyword_hits[:8], start=1):
+            print(
+                f"[{i}] k_score={hit.vector_score:.4f} page={hit.page} source={hit.source}\n"
+                f"    {_snippet(hit.text)}"
+            )
+
+    print("\n=== 3) 重排结果 ===")
     if result.reranker_applied:
         print(f"状态: 已启用 ({result.reranker_message})")
     else:
@@ -44,25 +53,29 @@ def _show_retrieval(result: RetrievalResult) -> None:
     if not result.final_hits:
         print("(空)")
     for i, hit in enumerate(result.final_hits, start=1):
+        score_label = "h_score" if result.keyword_hits is not None else "v_score"
         rr = "-" if hit.rerank_score is None else f"{hit.rerank_score:.4f}"
         print(
-            f"[{i}] r_score={rr} v_score={hit.vector_score:.4f} page={hit.page} source={hit.source}\n"
+            f"[{i}] r_score={rr} {score_label}={hit.vector_score:.4f} page={hit.page} source={hit.source}\n"
             f"    {_snippet(hit.text)}"
         )
 
 
 def _show_answer(answer: str, result: RetrievalResult) -> None:
-    print("\n=== 3) 最终回答 ===")
+    print("\n=== 4) 最终回答 ===")
     print(answer)
 
-    print("\n=== 4) 引用 ===")
+    print("\n=== 5) 引用 ===")
     if not result.final_hits:
         print("(空)")
         return
 
+    score_label = "h_score" if result.keyword_hits is not None else "v_score"
     for i, hit in enumerate(result.final_hits, start=1):
         rr = "-" if hit.rerank_score is None else f"{hit.rerank_score:.4f}"
-        print(f"[ref:{i}] source={hit.source} page={hit.page} r_score={rr} v_score={hit.vector_score:.4f}")
+        print(
+            f"[ref:{i}] source={hit.source} page={hit.page} r_score={rr} {score_label}={hit.vector_score:.4f}"
+        )
 
 
 def main() -> None:
@@ -92,10 +105,10 @@ def main() -> None:
             f"dim={stats.embedding_dim}"
         )
 
-    if store.row_count() == 0:
-        raise RuntimeError("向量库为空，请先执行 scripts/ingest_once.py 或使用 --rebuild-index")
-
     print(f"\nQuestion: {args.question}")
+    keyword_index = KeywordIndex.from_processed_dir(config.processed_data_dir)
+    if store.row_count() == 0 and keyword_index is None:
+        raise RuntimeError("索引为空，请先执行 scripts/ingest_once.py 或使用 --rebuild-index")
     retrieval = retrieve_hits(
         query=args.question,
         llm_clients=clients,
@@ -103,6 +116,9 @@ def main() -> None:
         reranker=reranker,
         top_k=config.retrieval_top_k,
         candidate_k=config.retrieval_candidate_k,
+        keyword_index=keyword_index,
+        vector_weight=config.hybrid_vector_weight,
+        keyword_weight=config.hybrid_keyword_weight,
     )
     _show_retrieval(retrieval)
 

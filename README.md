@@ -1,8 +1,8 @@
 # agentic-rag
 
 本项目是一个可运行的 **本地 Agentic RAG**（当前仅保留 CLI）：
-- 支持 `.txt/.md/.pdf` 入库与向量化检索
-- 向量检索 + 可选 reranker 重排
+- 支持 `.txt/.md/.pdf` 入库与向量化检索/关键词索引
+- 混合检索（向量 + 关键词）+ 默认启用 reranker 重排
 - Agentic 工具链（`retrieve -> calculate / budget_analyst`）与轨迹输出
 - 多轮 memory 追问（复用上一轮变量与结果）
 - Router Chain：先分类再决定是否进入检索链路
@@ -19,7 +19,7 @@
 用户问题
   -> Router 分类（闲聊 / 需要查询知识库 / 其他）
     -> Planner 生成工具计划（0~4 步）
-      -> Tool 执行（retrieve / calculate）
+      -> Tool 执行（retrieve / calculate / budget_analyst）
         -> 汇总引用 + 轨迹
           -> 最终回答
 ```
@@ -28,7 +28,7 @@
 - **Router Chain**：优先判断问题类型，闲聊不进检索链路，避免性能浪费。
 - **Planner**：根据问题/记忆决定是否需要检索或计算，最多 4 步。
 - **Tool 执行**：
-  - `retrieve`：向量检索 + 可选 rerank，写入 `memory`。
+  - `retrieve`：混合检索（向量 + 关键词）+ 默认启用 rerank，写入 `memory`。
   - `calculate`：从检索文本中提取变量 + 安全表达式计算。
   - `budget_analyst`：从年度预算与股价中生成增速、评分、评级。
 - **Memory**：保存上轮变量、计算结果、引用，支持追问复用。
@@ -50,7 +50,7 @@ python3 -m pip install -r requirements.txt
 - `LLM_API_URL` `LLM_API_KEY` `LLM_MODEL`
 - `EMBEDDING_API_URL` `EMBEDDING_API_KEY` `EMBEDDING_MODEL`
 
-建议配置（已接入 rerank）：
+建议配置（rerank 默认启用）：
 - `RERANKER_API_URL` `RERANKER_API_KEY` `RERANKER_MODEL`
 
 常用可选：
@@ -59,6 +59,8 @@ python3 -m pip install -r requirements.txt
 - `RAW_DATA_DIR`（默认 `./knowledge`）
 - `RETRIEVAL_TOP_K`（默认 `4`）
 - `RETRIEVAL_CANDIDATE_K`（默认 `12`）
+- `HYBRID_VECTOR_WEIGHT`（默认 `0.6`）
+- `HYBRID_KEYWORD_WEIGHT`（默认 `0.4`）
 
 ---
 
@@ -76,6 +78,7 @@ cp ~/docs/report.pdf knowledge/
 ```bash
 python3 scripts/ingest_once.py
 ```
+这一步会同时生成向量索引和 `data/processed/chunks.jsonl`，供关键词检索使用。
 
 ### 步骤 3：进入 CLI 对话
 方式一（推荐，自动走 conda 环境）：
@@ -131,24 +134,26 @@ python3 -m src.app.cli_chat --rebuild-index
 代码位置（可选）：
 `src/agent/planner.py`（路由逻辑）、`src/llm/prompts.py`（路由提示词）、`src/agent/graph.py`（分流后选择路径）
 
-### 4.2 检索与重排（retrieve）
-**功能**：向量检索文档片段，必要时使用 rerank 重排。
+### 4.2 混合检索与重排（retrieve）
+**功能**：先做向量检索 + 关键词检索，再合并成候选集，最后默认启用 rerank 重排。
 
 示例问题：
 ```
 请从 688230_20260203_JJZK.pdf 找到“净利润”相关描述
 ```
 输出包含：
-- 检索片段
+- 向量召回片段
+- 关键词召回片段
 - 引用来源与页码
-- rerank 信息（若启用）
+- rerank 信息（默认启用，未配置会自动降级）
 
 实现方式（怎么实现的）：
-- 系统先把“用户问题”或“指定检索关键词”转成向量（embedding），这一步是把文本变成可比较的数字。
-- 用这个向量去向量库里找“最相近”的文档片段（相似度高的先返回）。
-- 如果配置了 reranker，就把初步结果再交给重排模型，按“更相关”的顺序重新排序。
-- 最终结果会被写进 memory（包括检索到的原文片段、来源和页码），后续问题可直接复用。
-- 工具输出会生成一段“检索轨迹”，最终答案会引用这些片段，避免胡编。
+- **向量召回**：把问题转成向量，在向量库里找最相近的片段。
+- **关键词召回**：用 BM25（基于词频的经典算法）在本地 chunks 里找“关键词匹配高”的片段。
+- **关键词数据来源**：chunks 来自 `scripts/ingest_once.py` 生成的 `data/processed/chunks.jsonl`。
+- **合并候选**：把两路结果按权重融合成一个候选池（权重默认 0.6 向量 / 0.4 关键词）。
+- **默认启用 rerank**：候选池交给重排模型做最终排序（配置好 `RERANKER_*` 就会生效）。
+- **写入 memory**：最终结果写入 memory，后续追问可以直接复用。
 
 代码位置（可选）：
 `src/agent/tools/retrieve_tool.py`、`src/agent/tools/rag_retrieve.py`
@@ -267,3 +272,9 @@ python3 scripts/query_once.py --question "这份文件主要讲什么？"
 ## 7. 规划文档
 
 - `docs/multimodal_agentic_rag_plan.md`
+
+---
+
+## 7. 开发者的话
+
+- 目前存在数据检索不到，长上下文受网络波动影响大，长上下文答非所问等大量问题，还难以解决复杂查询，继续debug!~

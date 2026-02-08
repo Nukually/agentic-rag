@@ -12,6 +12,7 @@ from src.agent.graph import AgentExecutor
 from src.ingest.pipeline import IngestPipeline
 from src.llm.client import OpenAIClientBundle
 from src.retrieval.index_builder import RAGIndexer
+from src.retrieval.keyword_index import KeywordIndex
 from src.retrieval.reranker import OpenAIStyleReranker
 from src.retrieval.vector_store import MilvusVectorStore
 from src.utils.config import load_config
@@ -44,15 +45,18 @@ def main() -> None:
         stats = indexer.rebuild(config.raw_data_dir, config.processed_data_dir)
         print(f"[INFO] done files={stats.file_count} chunks={stats.chunk_count} dim={stats.embedding_dim}")
 
-    if store.row_count() == 0:
-        raise RuntimeError("Vector store is empty; run scripts/ingest_once.py or use --rebuild-index")
-
+    keyword_index = KeywordIndex.from_processed_dir(config.processed_data_dir)
+    if store.row_count() == 0 and keyword_index is None:
+        raise RuntimeError("Index is empty; run scripts/ingest_once.py or use --rebuild-index")
     agent = AgentExecutor(
         llm_clients=clients,
         vector_store=store,
         reranker=reranker,
         top_k=config.retrieval_top_k,
         candidate_k=config.retrieval_candidate_k,
+        keyword_index=keyword_index,
+        hybrid_vector_weight=config.hybrid_vector_weight,
+        hybrid_keyword_weight=config.hybrid_keyword_weight,
     )
 
     print(f"\nQuestion: {args.question}\n")
@@ -74,7 +78,10 @@ def main() -> None:
         print("(none)")
     for i, hit in enumerate(result.references, start=1):
         score = hit.rerank_score if hit.rerank_score is not None else hit.vector_score
-        score_name = "r_score" if hit.rerank_score is not None else "v_score"
+        if hit.rerank_score is not None:
+            score_name = "r_score"
+        else:
+            score_name = "h_score" if keyword_index is not None else "v_score"
         print(f"[ref:{i}] {hit.source} page={hit.page} {score_name}={score:.4f}")
 
     print("\n=== Memory Summary ===")
