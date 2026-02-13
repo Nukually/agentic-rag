@@ -2,6 +2,7 @@
 
 本项目是一个可运行的 **本地 Agentic RAG**（当前仅保留 CLI）：
 - 支持 `.txt/.md/.pdf` 入库与向量化检索/关键词索引
+- PDF 在文本提取之外，额外抽取表格并入库（可检索利润表/现金流量表等）
 - 混合检索（向量 + 关键词）+ 默认启用 reranker 重排
 - Agentic 工具链（`retrieve -> calculate / budget_analyst`）与轨迹输出
 - 多轮 memory 追问（复用上一轮变量与结果）
