@@ -283,8 +283,3 @@ python3 scripts/query_once.py --question "这份文件主要讲什么？"
 
 - `docs/multimodal_agentic_rag_plan.md`
 
----
-
-## 7. 开发者的话
-
-- 目前存在数据检索不到，长上下文受网络波动影响大，长上下文答非所问等大量问题，还难以解决复杂查询，继续debug!~
