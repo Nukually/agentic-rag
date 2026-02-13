@@ -5,6 +5,7 @@
 - PDF 在文本提取之外，额外抽取表格并入库（可检索利润表/现金流量表等）
 - 混合检索（向量 + 关键词）+ 默认启用 reranker 重排
 - Agentic 工具链（`retrieve -> calculate / budget_analyst`）与轨迹输出
+- 执行阶段耗时反馈（route / plan / tool / answer / total）
 - 多轮 memory 追问（复用上一轮变量与结果）
 - Router Chain：先分类再决定是否进入检索链路
 - 工具注册机制（可扩展 `web_search/sql/file`）
@@ -19,7 +20,7 @@
 ```
 用户问题
   -> Router 分类（闲聊 / 需要查询知识库 / 其他）
-    -> Planner 生成工具计划（0~4 步）
+    -> Planner 生成工具计划（默认 0~8 步，可配置）
       -> Tool 执行（retrieve / calculate / budget_analyst）
         -> 汇总引用 + 轨迹
           -> 最终回答
@@ -27,7 +28,7 @@
 
 关键细节：
 - **Router Chain**：优先判断问题类型，闲聊不进检索链路，避免性能浪费。
-- **Planner**：根据问题/记忆决定是否需要检索或计算，最多 4 步。
+- **Planner**：根据问题/记忆决定是否需要检索或计算，默认最多 8 步（可配置）。
 - **Tool 执行**：
   - `retrieve`：混合检索（向量 + 关键词）+ 默认启用 rerank，写入 `memory`。
   - `calculate`：从检索文本中提取变量 + 安全表达式计算。
@@ -58,10 +59,18 @@ python3 -m pip install -r requirements.txt
 - `MILVUS_URI`（默认 `./data/index/milvus.db`）
 - `MILVUS_COLLECTION`（默认 `rag_chunks`）
 - `RAW_DATA_DIR`（默认 `./knowledge`）
-- `RETRIEVAL_TOP_K`（默认 `4`）
-- `RETRIEVAL_CANDIDATE_K`（默认 `12`）
+- `CHUNK_SIZE`（默认 `1200`）
+- `CHUNK_OVERLAP`（默认 `180`）
+- `RETRIEVAL_TOP_K`（默认 `8`）
+- `RETRIEVAL_CANDIDATE_K`（默认 `64`）
 - `HYBRID_VECTOR_WEIGHT`（默认 `0.6`）
 - `HYBRID_KEYWORD_WEIGHT`（默认 `0.4`）
+- `EMBEDDING_BATCH_SIZE`（默认 `64`）
+- `CHAT_HISTORY_MAX_MESSAGES`（默认 `80`）
+- `PLANNER_MAX_STEPS`（默认 `8`）
+- `PLANNER_RECENT_HISTORY_MESSAGES`（默认 `20`）
+- `ANSWER_MAX_CONTEXTS`（默认 `16`）
+- `ANSWER_MAX_TRACES`（默认 `24`）
 
 ---
 

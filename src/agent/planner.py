@@ -22,9 +22,15 @@ class PlannedStep:
 
 
 class AgentPlanner:
-    def __init__(self, llm_clients: OpenAIClientBundle, max_steps: int = 4) -> None:
+    def __init__(
+        self,
+        llm_clients: OpenAIClientBundle,
+        max_steps: int = 8,
+        recent_history_window: int = 20,
+    ) -> None:
         self.llm_clients = llm_clients
-        self.max_steps = max_steps
+        self.max_steps = max(1, max_steps)
+        self.recent_history_window = max(1, recent_history_window)
 
     def plan(
         self,
@@ -49,7 +55,7 @@ class AgentPlanner:
             question=question,
             max_steps=self.max_steps,
             memory_summary=memory.summarize() if memory is not None else "<none>",
-            recent_history=history[-4:],
+            recent_history=history[-self.recent_history_window :],
         )
         try:
             raw = self.llm_clients.chat(

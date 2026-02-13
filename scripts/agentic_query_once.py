@@ -57,6 +57,10 @@ def main() -> None:
         keyword_index=keyword_index,
         hybrid_vector_weight=config.hybrid_vector_weight,
         hybrid_keyword_weight=config.hybrid_keyword_weight,
+        planner_max_steps=config.planner_max_steps,
+        planner_history_window=config.planner_recent_history_messages,
+        max_answer_contexts=config.answer_max_contexts,
+        max_answer_traces=config.answer_max_traces,
     )
 
     print(f"\nQuestion: {args.question}\n")
@@ -66,6 +70,7 @@ def main() -> None:
     print("=== Agent Trace ===")
     for step in result.traces:
         print(f"[{step.step_no}] tool={step.tool}")
+        print(f"    elapsed: {step.elapsed_ms:.1f} ms")
         print(f"    input: {step.tool_input}")
         if step.reason:
             print(f"    reason: {step.reason}")
@@ -86,6 +91,10 @@ def main() -> None:
 
     print("\n=== Memory Summary ===")
     print(result.memory_summary)
+
+    print("\n=== Stage Timings (ms) ===")
+    for name, value in result.stage_timings.items():
+        print(f"{name}: {value:.1f}")
 
 
 if __name__ == "__main__":

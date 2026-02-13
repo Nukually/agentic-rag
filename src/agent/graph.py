@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from time import perf_counter
 from typing import Callable
 
 from src.agent.memory import AgentMemory
@@ -29,6 +30,7 @@ class AgentTraceStep:
     tool_input: str
     reason: str
     observation: str
+    elapsed_ms: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,7 @@ class AgentResult:
     reranker_applied: bool
     reranker_message: str
     memory_summary: str
+    stage_timings: dict[str, float] = field(default_factory=dict)
 
 
 class AgentExecutor:
@@ -52,6 +55,11 @@ class AgentExecutor:
         keyword_index: KeywordIndex | None = None,
         hybrid_vector_weight: float = 0.6,
         hybrid_keyword_weight: float = 0.4,
+        planner_max_steps: int = 8,
+        planner_history_window: int = 20,
+        max_answer_contexts: int = 16,
+        max_answer_traces: int = 24,
+        progress_callback: Callable[[str, float, str], None] | None = None,
         planner: AgentPlanner | None = None,
         answer_fn: Callable[[str, list[RetrievedHit], list[AgentTraceStep], list[dict[str, str]]], str] | None = None,
         retrieve_fn: Callable[[str], RetrievalResult] | None = None,
@@ -65,7 +73,14 @@ class AgentExecutor:
         self.keyword_index = keyword_index
         self.hybrid_vector_weight = hybrid_vector_weight
         self.hybrid_keyword_weight = hybrid_keyword_weight
-        self.planner = planner or AgentPlanner(llm_clients=llm_clients, max_steps=4)
+        self.max_answer_contexts = max(1, max_answer_contexts)
+        self.max_answer_traces = max(1, max_answer_traces)
+        self.progress_callback = progress_callback
+        self.planner = planner or AgentPlanner(
+            llm_clients=llm_clients,
+            max_steps=planner_max_steps,
+            recent_history_window=planner_history_window,
+        )
         self.answer_fn = answer_fn
         self.memory = AgentMemory()
 
@@ -79,13 +94,25 @@ class AgentExecutor:
 
     def run(self, question: str, history: list[dict[str, str]] | None = None) -> AgentResult:
         history = history or []
+        stage_timings: dict[str, float] = {}
+        run_started = perf_counter()
+
+        route_started = perf_counter()
         route = self.planner.route_question(question)
+        route_elapsed_ms = (perf_counter() - route_started) * 1000.0
+        stage_timings["route"] = route_elapsed_ms
+        self._emit_progress("route", route_elapsed_ms, f"route={route or 'none'}")
+
+        plan_started = perf_counter()
         planned_steps = self.planner.plan(
             question=question,
             memory=self.memory,
             history=history,
             route=route,
         )
+        plan_elapsed_ms = (perf_counter() - plan_started) * 1000.0
+        stage_timings["plan"] = plan_elapsed_ms
+        self._emit_progress("plan", plan_elapsed_ms, f"steps={len(planned_steps)}")
         traces: list[AgentTraceStep] = []
         references: list[RetrievedHit] = []
 
@@ -94,7 +121,10 @@ class AgentExecutor:
 
         run_state: dict[str, object] = {}
         for i, step in enumerate(planned_steps, start=1):
+            step_started = perf_counter()
             if not self.registry.has(step.tool):
+                step_elapsed_ms = (perf_counter() - step_started) * 1000.0
+                stage_timings[f"tool_{i}_{step.tool}"] = step_elapsed_ms
                 traces.append(
                     AgentTraceStep(
                         step_no=i,
@@ -102,8 +132,10 @@ class AgentExecutor:
                         tool_input=step.input,
                         reason=step.reason,
                         observation=f"tool_not_registered: {step.tool}",
+                        elapsed_ms=step_elapsed_ms,
                     )
                 )
+                self._emit_progress("tool", step_elapsed_ms, f"step={i} tool={step.tool}")
                 continue
 
             tool_output = self.registry.run(
@@ -124,6 +156,8 @@ class AgentExecutor:
                     hybrid_keyword_weight=self.hybrid_keyword_weight,
                 ),
             )
+            step_elapsed_ms = (perf_counter() - step_started) * 1000.0
+            stage_timings[f"tool_{i}_{step.tool}"] = step_elapsed_ms
 
             traces.append(
                 AgentTraceStep(
@@ -132,8 +166,10 @@ class AgentExecutor:
                     tool_input=step.input,
                     reason=step.reason,
                     observation=tool_output.observation,
+                    elapsed_ms=step_elapsed_ms,
                 )
             )
+            self._emit_progress("tool", step_elapsed_ms, f"step={i} tool={step.tool}")
 
             references = self._merge_references(references, tool_output.references)
             self.memory.apply_delta(tool_output.memory_delta)
@@ -157,6 +193,7 @@ class AgentExecutor:
         else:
             system_prompt = AGENT_FINAL_SYSTEM_PROMPT
 
+        answer_started = perf_counter()
         answer = self._answer(
             question=question,
             references=references,
@@ -164,12 +201,19 @@ class AgentExecutor:
             history=history,
             system_prompt=system_prompt,
         )
+        answer_elapsed_ms = (perf_counter() - answer_started) * 1000.0
+        stage_timings["answer"] = answer_elapsed_ms
+        self._emit_progress("answer", answer_elapsed_ms, "final response")
 
         self.memory.turn_count += 1
         self.memory.last_question = question
         self.memory.last_answer = answer
         if references:
             self.memory.last_references = list(references)
+
+        total_elapsed_ms = (perf_counter() - run_started) * 1000.0
+        stage_timings["total"] = total_elapsed_ms
+        self._emit_progress("total", total_elapsed_ms, "run complete")
 
         return AgentResult(
             answer=answer,
@@ -178,6 +222,7 @@ class AgentExecutor:
             reranker_applied=reranker_applied,
             reranker_message=reranker_message,
             memory_summary=self.memory.summarize(),
+            stage_timings=stage_timings,
         )
 
     def reset_memory(self) -> None:
@@ -203,10 +248,14 @@ class AgentExecutor:
                 "source": hit.source,
                 "page": str(hit.page),
             }
-            for hit in references
+            for hit in references[: self.max_answer_contexts]
         ]
 
-        user_prompt = build_agent_answer_prompt(question=question, tool_traces=traces, contexts=contexts)
+        user_prompt = build_agent_answer_prompt(
+            question=question,
+            tool_traces=traces[: self.max_answer_traces],
+            contexts=contexts,
+        )
         messages = [{"role": "system", "content": system_prompt}, *history]
         messages.append({"role": "user", "content": user_prompt})
         return self.llm_clients.chat(messages=messages)
@@ -222,3 +271,11 @@ class AgentExecutor:
             seen.add(key)
             merged.append(hit)
         return merged
+
+    def _emit_progress(self, stage: str, elapsed_ms: float, detail: str) -> None:
+        if self.progress_callback is None:
+            return
+        try:
+            self.progress_callback(stage, elapsed_ms, detail)
+        except Exception:
+            return

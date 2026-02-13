@@ -40,7 +40,8 @@ def _print_agent_trace(result: object) -> None:
         tool_input = getattr(step, "tool_input", "")
         reason = getattr(step, "reason", "")
         observation = getattr(step, "observation", "")
-        print(f"  [{step_no}] tool={tool} input={tool_input}")
+        elapsed_ms = float(getattr(step, "elapsed_ms", 0.0) or 0.0)
+        print(f"  [{step_no}] tool={tool} input={tool_input} elapsed={elapsed_ms:.1f}ms")
         if reason:
             print(f"      reason: {reason}")
         print(f"      observation: {_snippet(observation, limit=140)}")
@@ -49,6 +50,13 @@ def _print_agent_trace(result: object) -> None:
 
 def chat_loop() -> None:
     config = load_config()
+
+    def _on_progress(stage: str, elapsed_ms: float, detail: str) -> None:
+        label = detail.strip()
+        if label:
+            print(f"[Timing] {stage}: {elapsed_ms:.1f} ms ({label})")
+            return
+        print(f"[Timing] {stage}: {elapsed_ms:.1f} ms")
 
     clients = OpenAIClientBundle(config)
     reranker = OpenAIStyleReranker(
@@ -70,6 +78,11 @@ def chat_loop() -> None:
         keyword_index=keyword_index,
         hybrid_vector_weight=config.hybrid_vector_weight,
         hybrid_keyword_weight=config.hybrid_keyword_weight,
+        planner_max_steps=config.planner_max_steps,
+        planner_history_window=config.planner_recent_history_messages,
+        max_answer_contexts=config.answer_max_contexts,
+        max_answer_traces=config.answer_max_traces,
+        progress_callback=_on_progress,
     )
 
     parser = argparse.ArgumentParser(description="Minimal Agentic RAG CLI")
@@ -92,6 +105,11 @@ def chat_loop() -> None:
 
     print("\nRAG chat started. Commands: /rebuild /reset /tools /memory /exit")
     print(f"[Agent] Registered tools: {', '.join(agent.available_tools())}")
+    print(
+        f"[Agent] Scale profile: history={config.chat_history_max_messages} msgs, "
+        f"planner_steps={config.planner_max_steps}, planner_history={config.planner_recent_history_messages}, "
+        f"retrieval_top_k={config.retrieval_top_k}, retrieval_candidate_k={config.retrieval_candidate_k}"
+    )
     history: list[dict[str, str]] = []
 
     while True:
@@ -152,7 +170,7 @@ def chat_loop() -> None:
 
         history.append({"role": "user", "content": user_text})
         history.append({"role": "assistant", "content": result.answer})
-        history = history[-12:]
+        history = history[-max(2, config.chat_history_max_messages) :]
 
 
 def main() -> None:

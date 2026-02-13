@@ -1,3 +1,7 @@
 .env
 __pycache__/
 *.pyc
+
+# Local index artifacts
+data/index/*.db
+data/processed/*.jsonl

@@ -17,6 +17,7 @@ class AppConfig:
     embedding_api_key: str
     embedding_model: str
     embedding_timeout: float
+    embedding_batch_size: int
 
     reranker_api_url: str
     reranker_api_key: str
@@ -35,6 +36,11 @@ class AppConfig:
     retrieval_candidate_k: int
     hybrid_vector_weight: float
     hybrid_keyword_weight: float
+    chat_history_max_messages: int
+    planner_max_steps: int
+    planner_recent_history_messages: int
+    answer_max_contexts: int
+    answer_max_traces: int
 
 
 def _required(name: str) -> str:
@@ -71,6 +77,7 @@ def load_config() -> AppConfig:
         embedding_api_key=_required("EMBEDDING_API_KEY"),
         embedding_model=_required("EMBEDDING_MODEL"),
         embedding_timeout=_get_float("EMBEDDING_TIMEOUT", 30.0),
+        embedding_batch_size=_get_int("EMBEDDING_BATCH_SIZE", 64),
         reranker_api_url=os.getenv("RERANKER_API_URL", "").strip(),
         reranker_api_key=os.getenv("RERANKER_API_KEY", "").strip(),
         reranker_model=os.getenv("RERANKER_MODEL", "").strip(),
@@ -79,10 +86,15 @@ def load_config() -> AppConfig:
         milvus_collection=os.getenv("MILVUS_COLLECTION", "rag_chunks").strip(),
         raw_data_dir=os.getenv("RAW_DATA_DIR", "./knowledge").strip(),
         processed_data_dir=os.getenv("PROCESSED_DATA_DIR", "./data/processed").strip(),
-        chunk_size=_get_int("CHUNK_SIZE", 1000),
-        chunk_overlap=_get_int("CHUNK_OVERLAP", 150),
-        retrieval_top_k=_get_int("RETRIEVAL_TOP_K", 4),
-        retrieval_candidate_k=_get_int("RETRIEVAL_CANDIDATE_K", 12),
+        chunk_size=_get_int("CHUNK_SIZE", 1200),
+        chunk_overlap=_get_int("CHUNK_OVERLAP", 180),
+        retrieval_top_k=_get_int("RETRIEVAL_TOP_K", 8),
+        retrieval_candidate_k=_get_int("RETRIEVAL_CANDIDATE_K", 64),
         hybrid_vector_weight=_get_float("HYBRID_VECTOR_WEIGHT", 0.6),
         hybrid_keyword_weight=_get_float("HYBRID_KEYWORD_WEIGHT", 0.4),
+        chat_history_max_messages=_get_int("CHAT_HISTORY_MAX_MESSAGES", 80),
+        planner_max_steps=_get_int("PLANNER_MAX_STEPS", 8),
+        planner_recent_history_messages=_get_int("PLANNER_RECENT_HISTORY_MESSAGES", 20),
+        answer_max_contexts=_get_int("ANSWER_MAX_CONTEXTS", 16),
+        answer_max_traces=_get_int("ANSWER_MAX_TRACES", 24),
     )

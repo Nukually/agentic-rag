@@ -29,12 +29,14 @@ class OpenAIClientBundle:
         )
         return (resp.choices[0].message.content or "").strip()
 
-    def embed_texts(self, texts: Sequence[str], batch_size: int = 32) -> list[list[float]]:
+    def embed_texts(self, texts: Sequence[str], batch_size: int | None = None) -> list[list[float]]:
         all_embeddings: list[list[float]] = []
         normalized = [text.replace("\n", " ").strip() for text in texts]
+        actual_batch_size = batch_size if batch_size is not None else self.config.embedding_batch_size
+        actual_batch_size = max(1, int(actual_batch_size))
 
-        for i in range(0, len(normalized), batch_size):
-            batch = normalized[i : i + batch_size]
+        for i in range(0, len(normalized), actual_batch_size):
+            batch = normalized[i : i + actual_batch_size]
             if not batch:
                 continue
             resp = self.embedding_client.embeddings.create(
