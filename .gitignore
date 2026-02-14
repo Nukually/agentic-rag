@@ -5,3 +5,4 @@ __pycache__/
 # Local index artifacts
 data/index/*.db
 data/processed/*.jsonl
+knowledge/

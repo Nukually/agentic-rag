@@ -38,9 +38,33 @@ class AgentPlanner:
         memory: AgentMemory | None = None,
         history: list[dict[str, str]] | None = None,
         route: str | None = None,
+        replan_feedback: str | None = None,
+        previous_steps: list[PlannedStep] | None = None,
+        previous_observations: list[str] | None = None,
     ) -> list[PlannedStep]:
         history = history or []
+        previous_steps = previous_steps or []
+        previous_observations = previous_observations or []
         route = route or self._route_question(question)
+
+        if replan_feedback:
+            reparsed = self._llm_plan(
+                question=question,
+                memory=memory,
+                history=history,
+                replan_feedback=replan_feedback,
+                previous_steps=previous_steps,
+                previous_observations=previous_observations,
+            )
+            if reparsed:
+                return reparsed[: self.max_steps]
+
+            heuristic_retry = self._heuristic_replan(question=question, memory=memory, feedback=replan_feedback)
+            if heuristic_retry:
+                return heuristic_retry[: self.max_steps]
+
+            return [PlannedStep(tool="retrieve", input=question, reason="retry fallback retrieve")]
+
         if route == "闲聊":
             return []
         heuristic_steps = self._heuristic_plan(question=question, memory=memory)
@@ -51,11 +75,36 @@ class AgentPlanner:
         if route is None and self._should_skip_tools(question):
             return []
 
+        parsed = self._llm_plan(
+            question=question,
+            memory=memory,
+            history=history,
+            replan_feedback=None,
+            previous_steps=[],
+            previous_observations=[],
+        )
+        if parsed:
+            return parsed[: self.max_steps]
+
+        return [PlannedStep(tool="retrieve", input=question, reason="fallback retrieve")]
+
+    def _llm_plan(
+        self,
+        question: str,
+        memory: AgentMemory | None,
+        history: list[dict[str, str]],
+        replan_feedback: str | None,
+        previous_steps: list[PlannedStep],
+        previous_observations: list[str],
+    ) -> list[PlannedStep]:
         prompt = build_agent_plan_prompt(
             question=question,
             max_steps=self.max_steps,
             memory_summary=memory.summarize() if memory is not None else "<none>",
             recent_history=history[-self.recent_history_window :],
+            replan_feedback=replan_feedback,
+            previous_steps=previous_steps,
+            previous_observations=previous_observations,
         )
         try:
             raw = self.llm_clients.chat(
@@ -65,13 +114,34 @@ class AgentPlanner:
                 ],
                 temperature=0.0,
             )
-            parsed = self._parse_steps(raw, memory=memory)
-            if parsed:
-                return parsed[: self.max_steps]
+            return self._parse_steps(raw, memory=memory)
         except Exception:
-            pass
+            return []
 
-        return [PlannedStep(tool="retrieve", input=question, reason="fallback retrieve")]
+    def _heuristic_replan(
+        self,
+        question: str,
+        memory: AgentMemory | None,
+        feedback: str,
+    ) -> list[PlannedStep]:
+        lower_feedback = feedback.lower()
+        expr = self._extract_symbolic_expression(question)
+
+        if "unknown variable" in lower_feedback:
+            if expr:
+                return [
+                    PlannedStep(tool="retrieve", input=question, reason="retry: fetch variables"),
+                    PlannedStep(tool="calculate", input=expr, reason="retry: recompute expression"),
+                ]
+            return [PlannedStep(tool="retrieve", input=question, reason="retry: fetch missing context")]
+
+        if "no hits" in lower_feedback or "missing references" in lower_feedback:
+            return [PlannedStep(tool="retrieve", input=question, reason="retry: broaden retrieval")]
+
+        if memory and memory.last_references and expr:
+            return [PlannedStep(tool="calculate", input=expr, reason="retry: reuse memory references")]
+
+        return []
 
     @staticmethod
     def _normalize_question(question: str) -> str:
@@ -109,9 +179,62 @@ class AgentPlanner:
     def _parse_route(text: str) -> str | None:
         if not text:
             return None
-        for label in ("需要查询知识库", "闲聊", "其他"):
-            if label in text:
-                return label
+        normalized = text.strip()
+        if not normalized:
+            return None
+
+        # Remove common wrappers from LLM outputs: quotes, markdown fences, punctuation, spaces.
+        normalized = re.sub(r"^```(?:text|json)?", "", normalized, flags=re.IGNORECASE).strip()
+        normalized = re.sub(r"```$", "", normalized).strip()
+        normalized = re.sub(r"\s+", "", normalized)
+        normalized = normalized.strip("`'\"：:。,.，；;!?！？()[]{}")
+
+        aliases = {
+            "闲聊": "闲聊",
+            "聊天": "闲聊",
+            "chitchat": "闲聊",
+            "需要查询知识库": "需要查询知识库",
+            "查询知识库": "需要查询知识库",
+            "知识库": "需要查询知识库",
+            "其他": "其他",
+            "通用": "其他",
+            "general": "其他",
+        }
+        if normalized in aliases:
+            return aliases[normalized]
+
+        labels = ("需要查询知识库", "闲聊", "其他")
+        hits: list[tuple[int, str]] = []
+        for label in labels:
+            idx = normalized.find(label)
+            if idx < 0:
+                continue
+            prefix = normalized[max(0, idx - 4) : idx]
+            # Avoid false positive such as "不需要查询知识库".
+            if label == "需要查询知识库" and (
+                "不需要" in prefix
+                or "无需" in prefix
+                or "不用" in prefix
+                or "不必" in prefix
+                or "不是" in prefix
+                or "并非" in prefix
+                or prefix.endswith("不")
+                or prefix.endswith("非")
+            ):
+                continue
+            if label in {"闲聊", "其他"} and (
+                prefix.endswith("不")
+                or prefix.endswith("非")
+                or prefix.endswith("别")
+                or prefix.endswith("不是")
+                or prefix.endswith("并非")
+            ):
+                continue
+            hits.append((idx, label))
+
+        if hits:
+            hits.sort(key=lambda item: item[0])
+            return hits[0][1]
         return None
 
     def route_question(self, question: str) -> str | None:
@@ -305,9 +428,11 @@ class AgentPlanner:
             tool = str(item.get("tool", "")).strip().lower()
             if tool not in {"retrieve", "calculate", "budget_analyst", "finish"}:
                 continue
+            if tool == "finish":
+                break
             text = str(item.get("input", "")).strip()
             reason = str(item.get("reason", "")).strip()
-            if tool != "finish" and not text:
+            if not text:
                 if tool in {"retrieve", "budget_analyst"}:
                     text = "用户问题"
                 else:

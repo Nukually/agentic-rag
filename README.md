@@ -5,7 +5,8 @@
 - PDF 在文本提取之外，额外抽取表格并入库（可检索利润表/现金流量表等）
 - 混合检索（向量 + 关键词）+ 默认启用 reranker 重排
 - Agentic 工具链（`retrieve -> calculate / budget_analyst`）与轨迹输出
-- 执行阶段耗时反馈（route / plan / tool / answer / total）
+- 内置反思循环：`reflect -> replan -> retry`（默认最多重试 1 次）
+- 执行阶段耗时反馈（route / plan / reflect / replan / tool / answer / total）
 - 多轮 memory 追问（复用上一轮变量与结果）
 - Router Chain：先分类再决定是否进入检索链路
 - 工具注册机制（可扩展 `web_search/sql/file`）
@@ -22,13 +23,16 @@
   -> Router 分类（闲聊 / 需要查询知识库 / 其他）
     -> Planner 生成工具计划（默认 0~8 步，可配置）
       -> Tool 执行（retrieve / calculate / budget_analyst）
-        -> 汇总引用 + 轨迹
-          -> 最终回答
+        -> Reflect 质量检查（是否需要重试）
+          -> Replan + Retry（最多 1 次，默认）
+            -> 汇总引用 + 轨迹
+              -> 最终回答
 ```
 
 关键细节：
 - **Router Chain**：优先判断问题类型，闲聊不进检索链路，避免性能浪费。
 - **Planner**：根据问题/记忆决定是否需要检索或计算，默认最多 8 步（可配置）。
+- **Reflect / Replan / Retry**：当检索无命中、计算变量缺失、工具运行异常等情况出现时，会自动反思并重规划。
 - **Tool 执行**：
   - `retrieve`：混合检索（向量 + 关键词）+ 默认启用 rerank，写入 `memory`。
   - `calculate`：从检索文本中提取变量 + 安全表达式计算。
@@ -232,7 +236,24 @@ python3 -m src.app.cli_chat --rebuild-index
 代码位置（可选）：
 `src/agent/memory.py`、`src/agent/planner.py`
 
-### 4.6 CLI 命令
+### 4.6 Reflect / Replan / Retry（执行期纠错）
+**功能**：执行工具链后自动做一轮反思；若判断当前结果质量不足，则重规划并重试一次（默认）。
+
+常见触发场景：
+- `retrieve` 返回 `no hits`
+- `calculate` 出现 `unknown variable`
+- 工具运行时抛异常（会被记录为 `tool_failed: ...`，不直接中断主流程）
+- 路由为“需要查询知识库”但计划为空或无引用
+
+实现方式（怎么实现的）：
+- 每轮工具执行后进入反思判定，输出 `should_retry / reason / replan_feedback`。
+- 需要重试时，规划器会接收“上一次计划 + 上一次观察 + replan_feedback”重新生成步骤。
+- 默认最多重试 1 次（`AgentExecutor(max_replan_retries=1)`）。
+
+代码位置（可选）：
+`src/agent/graph.py`、`src/agent/planner.py`、`src/llm/prompts.py`
+
+### 4.7 CLI 命令
 在对话中可使用：
 - `/rebuild`：重建索引
 - `/reset`：清空会话 + memory
@@ -244,6 +265,7 @@ python3 -m src.app.cli_chat --rebuild-index
 - CLI 里以 `/` 开头的输入会被当作命令处理，比如 `/tools`、`/memory`。
 - `/tools` 会列出当前注册的工具，让你确认系统能做哪些动作。
 - `/memory` 会打印当前记事本摘要，方便你知道系统“记住了什么”。
+- 若触发反思重试，CLI 的 Timing 会出现 `reflect_*` / `replan_*` 阶段。
 
 代码位置（可选）：
 `src/app/cli_chat.py`
@@ -283,3 +305,12 @@ python3 scripts/query_once.py --question "这份文件主要讲什么？"
 
 - `docs/multimodal_agentic_rag_plan.md`
 
+---
+
+## 8. 近期更新（同步代码实现）
+
+- 新增执行期反思循环：`reflect -> replan -> retry`。
+- 修复高风险问题：工具异常不再直接中断整次运行，改为观测并交给反思重试。
+- 修复中风险问题：`finish` 作为控制信号处理，不再误报 `tool_not_registered`。
+- 修复中风险问题：Router 分类解析增加规范化和否定词规避（如“这不是闲聊”“不需要查询知识库”）。
+- 修复中风险问题：知识库路由下空计划会触发补救重规划，避免直接无依据回答。

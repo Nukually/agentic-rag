@@ -61,6 +61,9 @@ def build_agent_plan_prompt(
     max_steps: int,
     memory_summary: str = "<none>",
     recent_history: list[dict[str, str]] | None = None,
+    replan_feedback: str | None = None,
+    previous_steps: list[object] | None = None,
+    previous_observations: list[str] | None = None,
 ) -> str:
     recent_history = recent_history or []
     if not recent_history:
@@ -73,11 +76,34 @@ def build_agent_plan_prompt(
             lines.append(f"{role}: {content}")
         history_text = "\n".join(lines)
 
+    replan_text = "<none>"
+    if replan_feedback:
+        replan_text = replan_feedback.strip() or "<none>"
+
+    prev_steps_text = "<none>"
+    if previous_steps:
+        lines: list[str] = []
+        for i, step in enumerate(previous_steps, start=1):
+            tool = getattr(step, "tool", "")
+            tool_input = getattr(step, "input", "")
+            reason = getattr(step, "reason", "")
+            lines.append(f"{i}. tool={tool} input={tool_input} reason={reason}")
+        prev_steps_text = "\n".join(lines) if lines else "<none>"
+
+    prev_obs_text = "<none>"
+    if previous_observations:
+        lines = [obs for obs in previous_observations if str(obs or "").strip()]
+        prev_obs_text = "\n".join(lines) if lines else "<none>"
+
     return (
         f"用户问题：{question}\n\n"
         f"记忆摘要：{memory_summary}\n\n"
         f"最近对话：\n{history_text}\n\n"
+        f"重规划反馈：\n{replan_text}\n\n"
+        f"上一次计划：\n{prev_steps_text}\n\n"
+        f"上一次观察：\n{prev_obs_text}\n\n"
         f"请输出不超过 {max_steps} 步的工具计划，仅 JSON。"
+        "如果这是重规划，请避免重复导致失败的步骤顺序。"
     )
 
 
