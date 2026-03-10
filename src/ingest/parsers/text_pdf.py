@@ -1,3 +1,5 @@
+"""Parse text/PDF files into normalized units for chunking and indexing."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -12,21 +14,32 @@ SUPPORTED_SUFFIXES = {".txt", ".md", ".pdf"}
 
 @dataclass(frozen=True)
 class ParsedUnit:
+    """Atomic parsed payload from a source document.
+
+    One unit usually maps to one PDF page text block or one extracted table.
+    """
+
     source: str
     text: str
     page: int
 
 
 def _read_text_file(path: Path) -> str:
+    """Read UTF-8 text-like files with tolerant decoding."""
+
     return path.read_text(encoding="utf-8", errors="ignore").strip()
 
 
 def _normalize_cell(value: Any) -> str:
+    """Normalize one table cell into a single-line string."""
+
     text = str(value or "").replace("\n", " ")
     return " ".join(text.split())
 
 
 def _trim_empty_columns(rows: list[list[str]]) -> list[list[str]]:
+    """Drop table columns that are empty for all rows."""
+
     if not rows:
         return []
 
@@ -42,6 +55,8 @@ def _trim_empty_columns(rows: list[list[str]]) -> list[list[str]]:
 
 
 def _table_to_text(rows: list[list[Any]], page_no: int, table_index: int) -> str:
+    """Convert extracted table rows into markdown-like plain text."""
+
     normalized_rows: list[list[str]] = []
     for row in rows:
         cells = [_normalize_cell(cell) for cell in row]
@@ -67,6 +82,8 @@ def _table_to_text(rows: list[list[Any]], page_no: int, table_index: int) -> str
 
 
 def _extract_tables(page: fitz.Page, source: str, page_no: int) -> list[ParsedUnit]:
+    """Extract table blocks from one PDF page if supported by runtime."""
+
     if not hasattr(page, "find_tables"):
         return []
 
@@ -91,6 +108,15 @@ def _extract_tables(page: fitz.Page, source: str, page_no: int) -> list[ParsedUn
 
 
 def _parse_pdf(path: Path) -> list[ParsedUnit]:
+    """Parse one PDF into page-text units plus table units.
+
+    Args:
+        path: PDF file path.
+
+    Returns:
+        list[ParsedUnit]: Parsed units tagged with source and page number.
+    """
+
     units: list[ParsedUnit] = []
     with fitz.open(path) as doc:
         for page_no, page in enumerate(doc, start=1):
@@ -102,6 +128,20 @@ def _parse_pdf(path: Path) -> list[ParsedUnit]:
 
 
 def parse_document(path: str) -> list[ParsedUnit]:
+    """Parse one supported file into `ParsedUnit` records.
+
+    Args:
+        path: Source file path (`.txt`, `.md`, `.pdf`).
+
+    Returns:
+        list[ParsedUnit]: Parsed text/table units.
+
+    Example:
+        >>> units = parse_document("./knowledge/report.pdf")
+        >>> units[0].page
+        1
+    """
+
     file_path = Path(path)
     suffix = file_path.suffix.lower()
 

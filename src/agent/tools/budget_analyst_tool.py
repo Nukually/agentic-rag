@@ -1,3 +1,5 @@
+"""Budget-analysis tool for extracting budget signals and producing ratings."""
+
 from __future__ import annotations
 
 import json
@@ -9,15 +11,34 @@ from src.agent.tools.registry import ToolContext, ToolOutput
 
 @dataclass(frozen=True)
 class BudgetItem:
+    """Normalized budget item with optional year information."""
+
     year: int | None
     value: float
     raw: str
 
 
 class BudgetAnalystTool:
+    """Analyze yearly budgets and output a stock-style rating signal.
+
+    Inputs can be either:
+    - structured JSON payload, or
+    - natural language text + retrieved context.
+    """
+
     name = "budget_analyst"
 
     def run(self, tool_input: str, context: ToolContext) -> ToolOutput:
+        """Run budget analysis and return observation/variables.
+
+        Args:
+            tool_input: Raw tool input; may contain JSON or free text.
+            context: Runtime context with question and retrieval text.
+
+        Returns:
+            ToolOutput: Rating summary plus extracted variables in memory delta.
+        """
+
         text_input = (tool_input or "").strip()
         payload = _parse_json_payload(text_input)
 
@@ -54,12 +75,16 @@ class BudgetAnalystTool:
 
 @dataclass(frozen=True)
 class AnalysisResult:
+    """Internal analysis payload used to build tool output."""
+
     observation: str
     memory_delta: dict[str, object]
     metadata: dict[str, object]
 
 
 def _parse_json_payload(text: str) -> dict | None:
+    """Parse a top-level JSON object payload when possible."""
+
     if not text:
         return None
     text = text.strip()
@@ -73,6 +98,8 @@ def _parse_json_payload(text: str) -> dict | None:
 
 
 def _build_combined_text(tool_input: str, question: str, retrieval_text: str) -> str:
+    """Merge tool input, question, and retrieval text for pattern extraction."""
+
     parts = []
     if tool_input and tool_input != "用户问题":
         parts.append(tool_input)
@@ -84,6 +111,8 @@ def _build_combined_text(tool_input: str, question: str, retrieval_text: str) ->
 
 
 def _parse_budgets_from_json(payload: dict) -> list[BudgetItem]:
+    """Extract budget items from a structured JSON payload."""
+
     budgets: list[BudgetItem] = []
     raw_items = payload.get("budgets") or payload.get("budget") or []
     if isinstance(raw_items, dict):
@@ -112,6 +141,8 @@ def _parse_budgets_from_json(payload: dict) -> list[BudgetItem]:
 
 
 def _parse_stock_price_from_json(payload: dict) -> float | None:
+    """Extract stock price from common JSON keys."""
+
     for key in ("stock_price", "price", "股价"):
         if key in payload:
             try:
@@ -122,6 +153,8 @@ def _parse_stock_price_from_json(payload: dict) -> float | None:
 
 
 def _extract_budgets_from_text(text: str) -> list[BudgetItem]:
+    """Extract budget amount/year pairs from free text using regex rules."""
+
     if not text:
         return []
 
@@ -166,6 +199,8 @@ def _extract_budgets_from_text(text: str) -> list[BudgetItem]:
 
 
 def _extract_stock_price_from_text(text: str) -> float | None:
+    """Extract stock price value from free text patterns."""
+
     if not text:
         return None
     price_pattern = re.compile(
@@ -182,6 +217,8 @@ def _extract_stock_price_from_text(text: str) -> float | None:
 
 
 def _unit_multiplier(unit: str) -> float:
+    """Convert amount unit strings (e.g. 亿, million) to multipliers."""
+
     if not unit:
         return 1.0
     u = unit.strip().lower()
@@ -219,6 +256,8 @@ def _unit_multiplier(unit: str) -> float:
 
 
 def _format_amount(value: float) -> str:
+    """Format large amounts with compact Chinese unit strings."""
+
     if value >= 1e12:
         return f"{value / 1e12:.2f}万亿"
     if value >= 1e8:
@@ -229,6 +268,8 @@ def _format_amount(value: float) -> str:
 
 
 def _detect_budget_tone(text: str) -> int:
+    """Detect textual tone of budget adjustment (+1 / 0 / -1)."""
+
     if not text:
         return 0
     if re.search(r"(下调|削减|减少|缩减|压缩).{0,6}预算|预算.{0,6}(下调|削减|减少|缩减|压缩)", text):
@@ -239,6 +280,8 @@ def _detect_budget_tone(text: str) -> int:
 
 
 def _select_latest_and_prev(budgets: list[BudgetItem]) -> tuple[BudgetItem | None, BudgetItem | None]:
+    """Select latest and previous budget entries, preferring year-tagged data."""
+
     with_year = [item for item in budgets if item.year is not None]
     if with_year:
         with_year.sort(key=lambda item: item.year or 0)
@@ -252,6 +295,12 @@ def _select_latest_and_prev(budgets: list[BudgetItem]) -> tuple[BudgetItem | Non
 
 
 def _analyze_budget(budgets: list[BudgetItem], stock_price: float | None, raw_text: str) -> AnalysisResult:
+    """Compute growth, score, rating, and exported variables.
+
+    Returns:
+        AnalysisResult: Observation text, memory delta, and structured metadata.
+    """
+
     latest, prev = _select_latest_and_prev(budgets)
     growth_pct: float | None = None
     notes: list[str] = []

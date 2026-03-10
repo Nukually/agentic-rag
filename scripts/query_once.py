@@ -1,3 +1,5 @@
+"""One-shot classic RAG query script with retrieval diagnostics output."""
+
 from __future__ import annotations
 
 import argparse
@@ -20,6 +22,8 @@ from src.utils.config import load_config
 
 
 def _snippet(text: str, limit: int = 110) -> str:
+    """Return a compact one-line preview for terminal output."""
+
     one_line = " ".join(text.split())
     if len(one_line) <= limit:
         return one_line
@@ -27,20 +31,31 @@ def _snippet(text: str, limit: int = 110) -> str:
 
 
 def _show_retrieval(result: RetrievalResult) -> None:
+    """Print vector hits, keyword hits, and reranked final hits."""
+
+    if result.retrieval_query:
+        print(f"\n[Query] rewrite={result.retrieval_query}")
+    if result.retrieval_queries:
+        print(f"[Query] variants={len(result.retrieval_queries)}")
+        for i, item in enumerate(result.retrieval_queries, start=1):
+            print(f"  ({i}) {item}")
+
     print("\n=== 1) 向量召回结果 ===")
     if not result.vector_hits:
         print("(空)")
     for i, hit in enumerate(result.vector_hits[:8], start=1):
+        company = hit.company_code or hit.company_name or "-"
         print(
-            f"[{i}] v_score={hit.vector_score:.4f} page={hit.page} source={hit.source}\n"
+            f"[{i}] v_score={hit.vector_score:.4f} page={hit.page} source={hit.source} company={company}\n"
             f"    {_snippet(hit.text)}"
         )
 
     if result.keyword_hits:
         print("\n=== 2) 关键词召回结果 ===")
         for i, hit in enumerate(result.keyword_hits[:8], start=1):
+            company = hit.company_code or hit.company_name or "-"
             print(
-                f"[{i}] k_score={hit.vector_score:.4f} page={hit.page} source={hit.source}\n"
+                f"[{i}] k_score={hit.vector_score:.4f} page={hit.page} source={hit.source} company={company}\n"
                 f"    {_snippet(hit.text)}"
             )
 
@@ -55,13 +70,16 @@ def _show_retrieval(result: RetrievalResult) -> None:
     for i, hit in enumerate(result.final_hits, start=1):
         score_label = "h_score" if result.keyword_hits is not None else "v_score"
         rr = "-" if hit.rerank_score is None else f"{hit.rerank_score:.4f}"
+        company = hit.company_code or hit.company_name or "-"
         print(
-            f"[{i}] r_score={rr} {score_label}={hit.vector_score:.4f} page={hit.page} source={hit.source}\n"
+            f"[{i}] r_score={rr} {score_label}={hit.vector_score:.4f} page={hit.page} source={hit.source} company={company}\n"
             f"    {_snippet(hit.text)}"
         )
 
 
 def _show_answer(answer: str, result: RetrievalResult) -> None:
+    """Print final answer and reference list."""
+
     print("\n=== 4) 最终回答 ===")
     print(answer)
 
@@ -73,12 +91,20 @@ def _show_answer(answer: str, result: RetrievalResult) -> None:
     score_label = "h_score" if result.keyword_hits is not None else "v_score"
     for i, hit in enumerate(result.final_hits, start=1):
         rr = "-" if hit.rerank_score is None else f"{hit.rerank_score:.4f}"
+        company = hit.company_code or hit.company_name or "-"
         print(
-            f"[ref:{i}] source={hit.source} page={hit.page} r_score={rr} {score_label}={hit.vector_score:.4f}"
+            f"[ref:{i}] source={hit.source} page={hit.page} company={company} "
+            f"r_score={rr} {score_label}={hit.vector_score:.4f}"
         )
 
 
 def main() -> None:
+    """Run one query through classic retrieve-then-generate flow.
+
+    Example:
+        $ python3 scripts/query_once.py --question "Summarize revenue drivers"
+    """
+
     parser = argparse.ArgumentParser(description="One-shot RAG query with visual retrieval output")
     parser.add_argument("--question", required=True, help="Question to ask")
     parser.add_argument("--rebuild-index", action="store_true", help="Rebuild index before querying")
@@ -119,6 +145,9 @@ def main() -> None:
         keyword_index=keyword_index,
         vector_weight=config.hybrid_vector_weight,
         keyword_weight=config.hybrid_keyword_weight,
+        query_rewrite_enabled=config.query_rewrite_enabled,
+        multi_query_enabled=config.multi_query_enabled,
+        multi_query_count=config.multi_query_count,
     )
     _show_retrieval(retrieval)
 

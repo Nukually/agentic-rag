@@ -1,3 +1,5 @@
+"""Compatibility wrapper that delegates to `scripts.ingest_once.main`."""
+
 from __future__ import annotations
 
 import sys

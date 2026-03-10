@@ -1,3 +1,10 @@
+"""Load and validate runtime configuration from environment variables.
+
+This module centralizes all runtime knobs used by ingestion, retrieval,
+planning, and answer generation. It keeps credentials and model settings out
+of source code and makes behavior tunable through `.env`.
+"""
+
 from __future__ import annotations
 
 import os
@@ -7,6 +14,8 @@ from dotenv import load_dotenv
 
 @dataclass(frozen=True)
 class AppConfig:
+    """Typed runtime configuration container."""
+
     llm_api_url: str
     llm_api_key: str
     llm_model: str
@@ -36,6 +45,9 @@ class AppConfig:
     retrieval_candidate_k: int
     hybrid_vector_weight: float
     hybrid_keyword_weight: float
+    query_rewrite_enabled: bool
+    multi_query_enabled: bool
+    multi_query_count: int
     chat_history_max_messages: int
     planner_max_steps: int
     planner_recent_history_messages: int
@@ -44,6 +56,8 @@ class AppConfig:
 
 
 def _required(name: str) -> str:
+    """Return a required environment value or raise an explicit error."""
+
     value = os.getenv(name, "").strip()
     if not value:
         raise ValueError(f"Missing required environment variable: {name}")
@@ -51,6 +65,8 @@ def _required(name: str) -> str:
 
 
 def _get_float(name: str, default: float) -> float:
+    """Read a float from environment with a fallback default."""
+
     raw = os.getenv(name)
     if raw is None or not raw.strip():
         return default
@@ -58,13 +74,45 @@ def _get_float(name: str, default: float) -> float:
 
 
 def _get_int(name: str, default: int) -> int:
+    """Read an integer from environment with a fallback default."""
+
     raw = os.getenv(name)
     if raw is None or not raw.strip():
         return default
     return int(raw)
 
 
+def _get_bool(name: str, default: bool) -> bool:
+    """Read a boolean from environment with a fallback default.
+
+    Accepted true values: `1/true/yes/on`
+    Accepted false values: `0/false/no/off`
+    """
+
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def load_config() -> AppConfig:
+    """Build an :class:`AppConfig` object from `.env` and process env vars.
+
+    Returns:
+        AppConfig: Fully populated app configuration with validated required
+        fields.
+
+    Example:
+        >>> config = load_config()
+        >>> config.retrieval_top_k
+        8
+    """
+
     load_dotenv(override=True)
 
     return AppConfig(
@@ -92,6 +140,9 @@ def load_config() -> AppConfig:
         retrieval_candidate_k=_get_int("RETRIEVAL_CANDIDATE_K", 64),
         hybrid_vector_weight=_get_float("HYBRID_VECTOR_WEIGHT", 0.6),
         hybrid_keyword_weight=_get_float("HYBRID_KEYWORD_WEIGHT", 0.4),
+        query_rewrite_enabled=_get_bool("QUERY_REWRITE_ENABLED", True),
+        multi_query_enabled=_get_bool("MULTI_QUERY_ENABLED", True),
+        multi_query_count=_get_int("MULTI_QUERY_COUNT", 3),
         chat_history_max_messages=_get_int("CHAT_HISTORY_MAX_MESSAGES", 80),
         planner_max_steps=_get_int("PLANNER_MAX_STEPS", 8),
         planner_recent_history_messages=_get_int("PLANNER_RECENT_HISTORY_MESSAGES", 20),

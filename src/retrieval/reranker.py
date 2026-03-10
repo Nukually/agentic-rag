@@ -1,3 +1,5 @@
+"""OpenAI-style reranker client with graceful fallback behavior."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -10,18 +12,30 @@ from src.retrieval.vector_store import SearchHit
 
 @dataclass(frozen=True)
 class RerankItem:
+    """One reranked hit with its relevance score."""
+
     hit: SearchHit
     rerank_score: float
 
 
 @dataclass(frozen=True)
 class RerankResult:
+    """Rerank execution result including status and ranked items."""
+
     applied: bool
     message: str
     items: list[RerankItem]
 
 
 class OpenAIStyleReranker:
+    """Call a reranker API compatible with OpenAI-like request/response shape.
+
+    Example:
+        >>> result = reranker.rerank(query="profit", hits=candidates, top_k=8)
+        >>> result.applied
+        True
+    """
+
     def __init__(
         self,
         api_url: str,
@@ -35,9 +49,22 @@ class OpenAIStyleReranker:
         self.timeout = timeout
 
     def enabled(self) -> bool:
+        """Return whether reranker configuration is complete."""
+
         return bool(self.api_url and self.api_key and self.model)
 
     def rerank(self, query: str, hits: list[SearchHit], top_k: int) -> RerankResult:
+        """Rerank candidate hits and return sorted output.
+
+        Args:
+            query: User query.
+            hits: Candidate documents to rerank.
+            top_k: Max number of ranked items requested.
+
+        Returns:
+            RerankResult: Applied state, message, and ranked items.
+        """
+
         if not hits:
             return RerankResult(applied=False, message="no candidate hits", items=[])
         if not self.enabled():
@@ -94,6 +121,8 @@ class OpenAIStyleReranker:
 
     @staticmethod
     def _build_endpoints(base_url: str) -> list[str]:
+        """Generate candidate reranker endpoints from a base URL."""
+
         endpoints = [f"{base_url}/rerank"]
         if not base_url.endswith("/v1"):
             endpoints.insert(0, f"{base_url}/v1/rerank")
@@ -109,6 +138,8 @@ class OpenAIStyleReranker:
 
     @staticmethod
     def _parse_pairs(payload: Any, total_docs: int) -> list[tuple[int, float]]:
+        """Parse rank-index and score pairs from heterogeneous response shapes."""
+
         items = OpenAIStyleReranker._extract_list(payload)
         pairs: list[tuple[int, float]] = []
 
@@ -147,6 +178,8 @@ class OpenAIStyleReranker:
 
     @staticmethod
     def _extract_list(payload: Any) -> list[Any]:
+        """Extract a result list from known response keys."""
+
         if isinstance(payload, list):
             return payload
         if not isinstance(payload, dict):

@@ -1,3 +1,5 @@
+"""Safe expression calculator based on AST node allow-listing."""
+
 from __future__ import annotations
 
 import ast
@@ -7,12 +9,20 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class CalcResult:
+    """Calculation result with resolved variables."""
+
     expression: str
     value: float
     variables: dict[str, float]
 
 
 class SafeCalculator:
+    """Evaluate arithmetic expressions with strict AST safety checks.
+
+    Supported operators include +, -, *, /, //, %, and **.
+    Variable values can be extracted from text patterns like `A=123`.
+    """
+
     _allowed_nodes = (
         ast.Expression,
         ast.BinOp,
@@ -37,6 +47,22 @@ class SafeCalculator:
         context_text: str = "",
         additional_variables: dict[str, float] | None = None,
     ) -> CalcResult:
+        """Evaluate an expression using variables from text and explicit inputs.
+
+        Args:
+            expression: Arithmetic expression (e.g. `A + B - 3`).
+            context_text: Retrieval text used for variable extraction.
+            additional_variables: Pre-supplied variables (e.g. memory values).
+
+        Returns:
+            CalcResult: Normalized expression, numeric value, and variables.
+
+        Example:
+            >>> calc = SafeCalculator()
+            >>> calc.evaluate("A + B", context_text="A=1 B=2").value
+            3.0
+        """
+
         normalized = " ".join(expression.strip().split())
         if not normalized:
             raise ValueError("empty expression")
@@ -54,6 +80,8 @@ class SafeCalculator:
 
     @staticmethod
     def extract_variables(text: str) -> dict[str, float]:
+        """Extract uppercase variable assignments from free text."""
+
         if not text:
             return {}
 
@@ -65,6 +93,8 @@ class SafeCalculator:
         return mapping
 
     def _eval_ast(self, expression: str, variables: dict[str, float]) -> float:
+        """Parse and evaluate expression AST after allow-list validation."""
+
         try:
             tree = ast.parse(expression, mode="eval")
         except SyntaxError as exc:
@@ -77,6 +107,8 @@ class SafeCalculator:
         return float(self._eval_node(tree.body, variables))
 
     def _eval_node(self, node: ast.AST, variables: dict[str, float]) -> float:
+        """Recursively evaluate one AST node."""
+
         if isinstance(node, ast.Constant):
             if isinstance(node.value, (int, float)):
                 return float(node.value)

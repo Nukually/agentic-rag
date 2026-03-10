@@ -1,3 +1,5 @@
+"""OpenAI-compatible client bundle for chat and embedding calls."""
+
 from __future__ import annotations
 
 from typing import Sequence
@@ -8,6 +10,17 @@ from src.utils.config import AppConfig
 
 
 class OpenAIClientBundle:
+    """Wrap chat and embedding clients behind a unified interface.
+
+    Args:
+        config: Application configuration containing endpoint, model, timeout,
+            and API key fields.
+
+    Example:
+        >>> clients = OpenAIClientBundle(config)
+        >>> text = clients.chat([{"role": "user", "content": "hello"}])
+    """
+
     def __init__(self, config: AppConfig) -> None:
         self.config = config
         self.llm_client = OpenAI(
@@ -22,6 +35,16 @@ class OpenAIClientBundle:
         )
 
     def chat(self, messages: list[dict[str, str]], temperature: float | None = None) -> str:
+        """Run a chat completion request and return plain text.
+
+        Args:
+            messages: OpenAI-style message list.
+            temperature: Optional override for sampling temperature.
+
+        Returns:
+            str: Model response text.
+        """
+
         resp = self.llm_client.chat.completions.create(
             model=self.config.llm_model,
             messages=messages,
@@ -30,6 +53,16 @@ class OpenAIClientBundle:
         return (resp.choices[0].message.content or "").strip()
 
     def embed_texts(self, texts: Sequence[str], batch_size: int | None = None) -> list[list[float]]:
+        """Embed multiple text inputs with configurable batching.
+
+        Args:
+            texts: Input text sequence.
+            batch_size: Optional batch size override.
+
+        Returns:
+            list[list[float]]: Embedding vectors in the same order as input.
+        """
+
         all_embeddings: list[list[float]] = []
         normalized = [text.replace("\n", " ").strip() for text in texts]
         actual_batch_size = batch_size if batch_size is not None else self.config.embedding_batch_size

@@ -1,3 +1,5 @@
+"""Agent execution runtime: route, plan, execute tools, reflect, and answer."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -25,6 +27,8 @@ from src.retrieval.keyword_index import KeywordIndex
 
 @dataclass(frozen=True)
 class AgentTraceStep:
+    """One executed tool step and its runtime observation."""
+
     step_no: int
     tool: str
     tool_input: str
@@ -35,6 +39,8 @@ class AgentTraceStep:
 
 @dataclass(frozen=True)
 class AgentResult:
+    """Final output payload returned by the agent runtime."""
+
     answer: str
     references: list[RetrievedHit]
     traces: list[AgentTraceStep]
@@ -46,12 +52,24 @@ class AgentResult:
 
 @dataclass(frozen=True)
 class ReflectionDecision:
+    """Reflection decision indicating whether a replan/retry is needed."""
+
     should_retry: bool
     reason: str
     replan_feedback: str
 
 
 class AgentExecutor:
+    """Execute the full agentic RAG loop for one user question.
+
+    Flow:
+        route -> plan -> tool execution -> reflect/replan (optional) -> answer.
+
+    Example:
+        >>> result = agent.run("Please summarize revenue trends in the report.")
+        >>> result.answer
+    """
+
     def __init__(
         self,
         llm_clients: OpenAIClientBundle,
@@ -62,11 +80,15 @@ class AgentExecutor:
         keyword_index: KeywordIndex | None = None,
         hybrid_vector_weight: float = 0.6,
         hybrid_keyword_weight: float = 0.4,
+        query_rewrite_enabled: bool = True,
+        multi_query_enabled: bool = True,
+        multi_query_count: int = 3,
         planner_max_steps: int = 8,
         planner_history_window: int = 20,
         max_replan_retries: int = 1,
         max_answer_contexts: int = 16,
         max_answer_traces: int = 24,
+        answer_context_char_limit: int = 900,
         progress_callback: Callable[[str, float, str], None] | None = None,
         planner: AgentPlanner | None = None,
         answer_fn: Callable[[str, list[RetrievedHit], list[AgentTraceStep], list[dict[str, str]]], str] | None = None,
@@ -81,9 +103,13 @@ class AgentExecutor:
         self.keyword_index = keyword_index
         self.hybrid_vector_weight = hybrid_vector_weight
         self.hybrid_keyword_weight = hybrid_keyword_weight
+        self.query_rewrite_enabled = bool(query_rewrite_enabled)
+        self.multi_query_enabled = bool(multi_query_enabled)
+        self.multi_query_count = max(1, int(multi_query_count))
         self.max_replan_retries = max(0, max_replan_retries)
         self.max_answer_contexts = max(1, max_answer_contexts)
         self.max_answer_traces = max(1, max_answer_traces)
+        self.answer_context_char_limit = max(200, int(answer_context_char_limit))
         self.progress_callback = progress_callback
         self.planner = planner or AgentPlanner(
             llm_clients=llm_clients,
@@ -102,6 +128,16 @@ class AgentExecutor:
             self.registry.register(BudgetAnalystTool())
 
     def run(self, question: str, history: list[dict[str, str]] | None = None) -> AgentResult:
+        """Execute one full agent run and return answer, refs, traces, timings.
+
+        Args:
+            question: User question for this turn.
+            history: Prior conversation messages in chat format.
+
+        Returns:
+            AgentResult: Full execution result including references and traces.
+        """
+
         history = history or []
         stage_timings: dict[str, float] = {}
         run_started = perf_counter()
@@ -196,6 +232,9 @@ class AgentExecutor:
                             candidate_k=self.candidate_k,
                             hybrid_vector_weight=self.hybrid_vector_weight,
                             hybrid_keyword_weight=self.hybrid_keyword_weight,
+                            query_rewrite_enabled=self.query_rewrite_enabled,
+                            multi_query_enabled=self.multi_query_enabled,
+                            multi_query_count=self.multi_query_count,
                         ),
                     )
                 except Exception as exc:
@@ -284,16 +323,21 @@ class AgentExecutor:
             system_prompt = AGENT_FINAL_SYSTEM_PROMPT
 
         answer_started = perf_counter()
-        answer = self._answer(
-            question=question,
-            references=references,
-            traces=traces,
-            history=history,
-            system_prompt=system_prompt,
-        )
+        answer_detail = "final response"
+        try:
+            answer = self._answer(
+                question=question,
+                references=references,
+                traces=traces,
+                history=history,
+                system_prompt=system_prompt,
+            )
+        except Exception as exc:
+            answer = self._build_answer_fallback(question=question, references=references, error=exc)
+            answer_detail = f"fallback due {exc.__class__.__name__}"
         answer_elapsed_ms = (perf_counter() - answer_started) * 1000.0
         stage_timings["answer"] = answer_elapsed_ms
-        self._emit_progress("answer", answer_elapsed_ms, "final response")
+        self._emit_progress("answer", answer_elapsed_ms, answer_detail)
 
         self.memory.turn_count += 1
         self.memory.last_question = question
@@ -322,6 +366,8 @@ class AgentExecutor:
         round_traces: list[AgentTraceStep],
         references: list[RetrievedHit],
     ) -> ReflectionDecision:
+        """Evaluate round quality and decide whether another round is needed."""
+
         if not planned_steps:
             if route == "需要查询知识库":
                 return ReflectionDecision(
@@ -427,9 +473,13 @@ class AgentExecutor:
         )
 
     def reset_memory(self) -> None:
+        """Reset persistent memory for a new clean conversation."""
+
         self.memory.reset()
 
     def available_tools(self) -> list[str]:
+        """Return registered tool names."""
+
         return self.registry.names()
 
     def _answer(
@@ -440,12 +490,14 @@ class AgentExecutor:
         history: list[dict[str, str]],
         system_prompt: str = AGENT_FINAL_SYSTEM_PROMPT,
     ) -> str:
+        """Generate final answer from references, traces, and conversation."""
+
         if self.answer_fn is not None:
             return self.answer_fn(question, references, traces, history)
 
         contexts = [
             {
-                "text": hit.text,
+                "text": self._truncate_context_text(hit.text, self.answer_context_char_limit),
                 "source": hit.source,
                 "page": str(hit.page),
             }
@@ -462,7 +514,39 @@ class AgentExecutor:
         return self.llm_clients.chat(messages=messages)
 
     @staticmethod
+    def _truncate_context_text(text: str, limit: int) -> str:
+        """Truncate one context block to control final-answer prompt size."""
+
+        content = " ".join((text or "").split())
+        if len(content) <= limit:
+            return content
+        return content[:limit] + " ..."
+
+    @staticmethod
+    def _build_answer_fallback(question: str, references: list[RetrievedHit], error: Exception) -> str:
+        """Return a resilient fallback answer when final generation fails."""
+
+        error_name = error.__class__.__name__
+        if not references:
+            return (
+                "回答阶段超时，当前未生成完整答案。"
+                f"（error={error_name}）请缩小问题范围或稍后重试。"
+            )
+
+        lines = [
+            f"回答阶段超时，先返回检索到的关键依据（error={error_name}）：",
+            f"问题：{question}",
+        ]
+        for i, hit in enumerate(references[:8], start=1):
+            snippet = " ".join((hit.text or "").split())[:110]
+            lines.append(f"[ref:{i}] {hit.source} page={hit.page} -> {snippet}")
+        lines.append("可重试同一问题，或改为“按公司分批（前10家/后10家）”提问以降低超时风险。")
+        return "\n".join(lines)
+
+    @staticmethod
     def _merge_references(current: list[RetrievedHit], incoming: list[RetrievedHit]) -> list[RetrievedHit]:
+        """Merge and de-duplicate references from multiple tool outputs."""
+
         merged = list(current)
         seen = {(item.source, item.page, item.text[:120]) for item in current}
         for hit in incoming:
@@ -474,6 +558,8 @@ class AgentExecutor:
         return merged
 
     def _emit_progress(self, stage: str, elapsed_ms: float, detail: str) -> None:
+        """Emit stage progress to optional callback without interrupting flow."""
+
         if self.progress_callback is None:
             return
         try:

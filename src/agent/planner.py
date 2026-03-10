@@ -1,3 +1,5 @@
+"""Router and planner logic for selecting and sequencing agent tools."""
+
 from __future__ import annotations
 
 import json
@@ -16,12 +18,20 @@ from src.llm.prompts import (
 
 @dataclass(frozen=True)
 class PlannedStep:
+    """One planned tool invocation."""
+
     tool: str
     input: str
     reason: str
 
 
 class AgentPlanner:
+    """Plan tool steps from question, memory, and conversation history.
+
+    The planner combines LLM planning with heuristic fallbacks to improve
+    robustness for common workflows such as retrieval+calculation chains.
+    """
+
     def __init__(
         self,
         llm_clients: OpenAIClientBundle,
@@ -42,6 +52,21 @@ class AgentPlanner:
         previous_steps: list[PlannedStep] | None = None,
         previous_observations: list[str] | None = None,
     ) -> list[PlannedStep]:
+        """Return ordered tool steps for the current round.
+
+        Args:
+            question: User question for this turn.
+            memory: Current conversation memory snapshot.
+            history: Multi-turn dialogue history.
+            route: Optional precomputed route label from router.
+            replan_feedback: Feedback produced by reflection stage.
+            previous_steps: Last round's plan.
+            previous_observations: Last round's tool observations.
+
+        Returns:
+            list[PlannedStep]: Planned tool sequence for execution.
+        """
+
         history = history or []
         previous_steps = previous_steps or []
         previous_observations = previous_observations or []
@@ -65,9 +90,9 @@ class AgentPlanner:
 
             return [PlannedStep(tool="retrieve", input=question, reason="retry fallback retrieve")]
 
-        if route == "闲聊":
-            return []
         heuristic_steps = self._heuristic_plan(question=question, memory=memory)
+        if route == "闲聊" and not heuristic_steps:
+            return []
         if heuristic_steps:
             return heuristic_steps[: self.max_steps]
         if route == "其他":
@@ -97,6 +122,8 @@ class AgentPlanner:
         previous_steps: list[PlannedStep],
         previous_observations: list[str],
     ) -> list[PlannedStep]:
+        """Generate tool steps by prompting the planning model."""
+
         prompt = build_agent_plan_prompt(
             question=question,
             max_steps=self.max_steps,
@@ -124,6 +151,8 @@ class AgentPlanner:
         memory: AgentMemory | None,
         feedback: str,
     ) -> list[PlannedStep]:
+        """Fallback replan strategy when model planning is unavailable."""
+
         lower_feedback = feedback.lower()
         expr = self._extract_symbolic_expression(question)
 
@@ -159,9 +188,17 @@ class AgentPlanner:
         return token_count <= 8
 
     def _route_question(self, question: str) -> str | None:
+        """Classify a question into chat/knowledge/general route labels."""
+
         q = self._normalize_question(question)
         if not q:
             return None
+        if self._is_coverage_feedback_text(q):
+            return "需要查询知识库"
+        if self._has_doc_hints(q):
+            return "需要查询知识库"
+        if self._is_smalltalk(q):
+            return "闲聊"
         prompt = build_agent_router_prompt(q)
         try:
             raw = self.llm_clients.chat(
@@ -238,6 +275,8 @@ class AgentPlanner:
         return None
 
     def route_question(self, question: str) -> str | None:
+        """Public wrapper for question routing."""
+
         return self._route_question(question)
 
     @staticmethod
@@ -323,6 +362,23 @@ class AgentPlanner:
         return any(key in question for key in keywords)
 
     def _heuristic_plan(self, question: str, memory: AgentMemory | None) -> list[PlannedStep]:
+        """Fast-path planning for frequent deterministic patterns.
+
+        Example:
+            - symbolic math expression -> retrieve + calculate
+            - follow-up arithmetic -> calculate with LAST_RESULT
+        """
+
+        if self._is_coverage_followup(question=question, memory=memory):
+            coverage_query = self._build_coverage_followup_query(question=question, memory=memory)
+            return [
+                PlannedStep(
+                    tool="retrieve",
+                    input=coverage_query,
+                    reason="补全遗漏信息，扩大覆盖范围后重新检索",
+                ),
+            ]
+
         if self._is_budget_analysis_request(question):
             return [
                 PlannedStep(tool="retrieve", input=question, reason="collect annual budget data"),
@@ -412,7 +468,101 @@ class AgentPlanner:
 
         return None
 
+    @staticmethod
+    def _is_coverage_followup(question: str, memory: AgentMemory | None) -> bool:
+        """Detect follow-up messages indicating previous answer missed entities.
+
+        Example:
+            - 你漏掉了一些公司
+            - 请补充遗漏公司并重新回答
+        """
+
+        if memory is None:
+            return False
+        if not (memory.last_question or memory.last_references):
+            return False
+
+        q = " ".join((question or "").strip().split()).lower()
+        if not q:
+            return False
+
+        omission_hints = (
+            "漏掉",
+            "漏下",
+            "遗漏",
+            "不全",
+            "缺少",
+            "没覆盖",
+            "没写全",
+            "补充",
+            "还有",
+            "少了",
+            "missing",
+            "omitted",
+            "incomplete",
+        )
+        target_hints = (
+            "公司",
+            "企业",
+            "标的",
+            "全部",
+            "所有",
+            "每家",
+            "all companies",
+            "all firms",
+        )
+        has_omission = any(token in q for token in omission_hints)
+        has_target = any(token in q for token in target_hints)
+        return has_omission and (has_target or bool(memory.last_references))
+
+    @staticmethod
+    def _is_coverage_feedback_text(question: str) -> bool:
+        """Detect omission-feedback text without relying on memory state."""
+
+        q = " ".join((question or "").strip().lower().split())
+        if not q:
+            return False
+
+        omission_hints = (
+            "漏掉",
+            "漏下",
+            "遗漏",
+            "不全",
+            "缺少",
+            "没覆盖",
+            "补充",
+            "少了",
+            "missing",
+            "omitted",
+            "incomplete",
+        )
+        target_hints = (
+            "公司",
+            "企业",
+            "标的",
+            "全部",
+            "所有",
+            "all companies",
+            "all firms",
+        )
+        return any(token in q for token in omission_hints) and any(token in q for token in target_hints)
+
+    @staticmethod
+    def _build_coverage_followup_query(question: str, memory: AgentMemory | None) -> str:
+        """Construct a retrieval query that emphasizes complete coverage."""
+
+        base = ""
+        if memory is not None:
+            base = " ".join((memory.last_question or "").strip().split())
+        if not base:
+            base = " ".join((question or "").strip().split())
+        if not base:
+            return "用户问题"
+        return f"{base} 请覆盖所有公司并避免遗漏，按公司逐一给出依据"
+
     def _parse_steps(self, raw: str, memory: AgentMemory | None) -> list[PlannedStep]:
+        """Parse model JSON into validated, normalized planned steps."""
+
         payload = self._extract_json(raw)
         if payload is None:
             return []

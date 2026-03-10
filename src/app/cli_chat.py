@@ -1,3 +1,5 @@
+"""Interactive CLI entrypoint for multi-turn agentic RAG chat."""
+
 from __future__ import annotations
 
 import argparse
@@ -13,6 +15,8 @@ from src.utils.config import load_config
 
 
 def _build_index(indexer: RAGIndexer, raw_data_dir: str, processed_data_dir: str) -> None:
+    """Rebuild retrieval artifacts and print compact stats."""
+
     stats = indexer.rebuild(raw_data_dir=raw_data_dir, processed_data_dir=processed_data_dir)
     print(
         f"[INFO] Index rebuilt. files={stats.file_count} chunks={stats.chunk_count} "
@@ -20,7 +24,23 @@ def _build_index(indexer: RAGIndexer, raw_data_dir: str, processed_data_dir: str
     )
 
 
+def _upsert_index(indexer: RAGIndexer, raw_data_dir: str, processed_data_dir: str, file_path: str) -> None:
+    """Incrementally upsert one file into existing retrieval artifacts."""
+
+    stats = indexer.upsert_files(
+        file_paths=[file_path],
+        processed_data_dir=processed_data_dir,
+        raw_data_dir=raw_data_dir,
+    )
+    print(
+        f"[INFO] File upserted. files={stats.file_count} chunks={stats.chunk_count} "
+        f"dim={stats.embedding_dim} processed={stats.processed_file}"
+    )
+
+
 def _snippet(text: str, limit: int = 90) -> str:
+    """Format a one-line snippet for logs and traces."""
+
     one_line = " ".join(text.split())
     if len(one_line) <= limit:
         return one_line
@@ -28,6 +48,8 @@ def _snippet(text: str, limit: int = 90) -> str:
 
 
 def _print_agent_trace(result: object) -> None:
+    """Pretty-print tool execution traces emitted by the agent."""
+
     traces = getattr(result, "traces", [])
     if not traces:
         print("[Agent] No tool step executed.\n")
@@ -49,6 +71,16 @@ def _print_agent_trace(result: object) -> None:
 
 
 def chat_loop() -> None:
+    """Run the interactive chat loop until the user exits.
+
+    This function wires all runtime dependencies (LLM clients, indexes, agent)
+    and handles interactive commands such as `/rebuild`, `/upsert`, `/memory`, and
+    `/reset`.
+
+    Example:
+        $ python -m src.app.cli_chat --rebuild-index
+    """
+
     config = load_config()
 
     def _on_progress(stage: str, elapsed_ms: float, detail: str) -> None:
@@ -78,6 +110,9 @@ def chat_loop() -> None:
         keyword_index=keyword_index,
         hybrid_vector_weight=config.hybrid_vector_weight,
         hybrid_keyword_weight=config.hybrid_keyword_weight,
+        query_rewrite_enabled=config.query_rewrite_enabled,
+        multi_query_enabled=config.multi_query_enabled,
+        multi_query_count=config.multi_query_count,
         planner_max_steps=config.planner_max_steps,
         planner_history_window=config.planner_recent_history_messages,
         max_answer_contexts=config.answer_max_contexts,
@@ -103,12 +138,14 @@ def chat_loop() -> None:
     elif store.row_count() == 0:
         print("[WARN] Vector store is empty. Falling back to keyword retrieval only.")
 
-    print("\nRAG chat started. Commands: /rebuild /reset /tools /memory /exit")
+    print("\nRAG chat started. Commands: /rebuild /upsert <file> /reset /tools /memory /exit")
     print(f"[Agent] Registered tools: {', '.join(agent.available_tools())}")
     print(
         f"[Agent] Scale profile: history={config.chat_history_max_messages} msgs, "
         f"planner_steps={config.planner_max_steps}, planner_history={config.planner_recent_history_messages}, "
-        f"retrieval_top_k={config.retrieval_top_k}, retrieval_candidate_k={config.retrieval_candidate_k}"
+        f"retrieval_top_k={config.retrieval_top_k}, retrieval_candidate_k={config.retrieval_candidate_k}, "
+        f"query_rewrite={config.query_rewrite_enabled}, multi_query={config.multi_query_enabled}, "
+        f"multi_query_count={config.multi_query_count}"
     )
     history: list[dict[str, str]] = []
 
@@ -137,6 +174,19 @@ def chat_loop() -> None:
             continue
         if user_text.lower() == "/rebuild":
             _build_index(indexer, config.raw_data_dir, config.processed_data_dir)
+            keyword_index = KeywordIndex.from_processed_dir(config.processed_data_dir)
+            agent.keyword_index = keyword_index
+            continue
+        if user_text.lower().startswith("/upsert"):
+            file_path = user_text[len("/upsert") :].strip()
+            if not file_path:
+                print("[WARN] Usage: /upsert <file_path>")
+                continue
+            try:
+                _upsert_index(indexer, config.raw_data_dir, config.processed_data_dir, file_path)
+            except Exception as exc:
+                print(f"[ERROR] Upsert failed: {exc}")
+                continue
             keyword_index = KeywordIndex.from_processed_dir(config.processed_data_dir)
             agent.keyword_index = keyword_index
             continue
@@ -174,6 +224,8 @@ def chat_loop() -> None:
 
 
 def main() -> None:
+    """Program entrypoint used by `python -m src.app.cli_chat`."""
+
     chat_loop()
 
 

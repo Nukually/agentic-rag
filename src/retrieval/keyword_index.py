@@ -1,3 +1,5 @@
+"""BM25-style keyword index built from processed chunk JSONL."""
+
 from __future__ import annotations
 
 import json
@@ -13,6 +15,8 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9_]+|[\u4e00-\u9fff]")
 
 
 def _tokenize(text: str) -> list[str]:
+    """Tokenize mixed Chinese/English text into BM25 terms."""
+
     if not text:
         return []
     return _TOKEN_RE.findall(text.lower())
@@ -20,14 +24,28 @@ def _tokenize(text: str) -> list[str]:
 
 @dataclass(frozen=True)
 class KeywordDoc:
+    """Keyword-searchable document unit for BM25 indexing."""
+
     text: str
     source: str
     page: int
     chunk_index: int
     tokens: list[str]
+    doc_id: str
+    file_name: str
+    source_type: str
+    company_code: str
+    company_name: str
+    report_year: int | None
+    is_table: bool
 
 
 class KeywordIndex:
+    """In-memory BM25 index for chunk-level keyword retrieval.
+
+    The index complements dense vector retrieval for exact term/entity queries.
+    """
+
     def __init__(self, docs: list[KeywordDoc], k1: float = 1.5, b: float = 0.75) -> None:
         self.docs = docs
         self.k1 = k1
@@ -42,6 +60,8 @@ class KeywordIndex:
 
     @classmethod
     def from_jsonl(cls, jsonl_path: str) -> KeywordIndex | None:
+        """Build an index from a processed `chunks.jsonl` file."""
+
         path = Path(jsonl_path)
         if not path.exists():
             return None
@@ -69,6 +89,13 @@ class KeywordIndex:
                         page=int(raw.get("page", 0) or 0),
                         chunk_index=int(raw.get("chunk_index", 0) or 0),
                         tokens=tokens,
+                        doc_id=str(raw.get("doc_id", "")),
+                        file_name=str(raw.get("file_name", "")),
+                        source_type=str(raw.get("source_type", "")),
+                        company_code=str(raw.get("company_code", "")),
+                        company_name=str(raw.get("company_name", "")),
+                        report_year=_to_int_or_none(raw.get("report_year")),
+                        is_table=bool(raw.get("is_table", False)),
                     )
                 )
 
@@ -78,10 +105,22 @@ class KeywordIndex:
 
     @classmethod
     def from_processed_dir(cls, processed_dir: str) -> KeywordIndex | None:
+        """Build an index from `{processed_dir}/chunks.jsonl` if present."""
+
         path = Path(processed_dir) / "chunks.jsonl"
         return cls.from_jsonl(str(path))
 
     def search(self, query: str, top_k: int) -> list[SearchHit]:
+        """Run BM25 scoring and return top chunk hits.
+
+        Args:
+            query: Raw user query.
+            top_k: Number of results to return.
+
+        Returns:
+            list[SearchHit]: Ranked keyword hits with BM25 scores.
+        """
+
         if not query or not self.docs:
             return []
 
@@ -117,11 +156,20 @@ class KeywordIndex:
                     source=doc.source,
                     page=doc.page,
                     score=float(score),
+                    doc_id=doc.doc_id,
+                    file_name=doc.file_name,
+                    source_type=doc.source_type,
+                    company_code=doc.company_code,
+                    company_name=doc.company_name,
+                    report_year=doc.report_year,
+                    is_table=doc.is_table,
                 )
             )
         return hits
 
     def _build(self) -> None:
+        """Build internal inverted index and IDF statistics."""
+
         inv_index: dict[str, list[tuple[int, int]]] = defaultdict(list)
         doc_len: list[int] = []
         df: dict[str, int] = defaultdict(int)
@@ -140,3 +188,14 @@ class KeywordIndex:
             term: math.log(1.0 + (len(self.docs) - freq + 0.5) / (freq + 0.5))
             for term, freq in df.items()
         }
+
+
+def _to_int_or_none(value: object) -> int | None:
+    """Best-effort parse for optional integer metadata fields."""
+
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None

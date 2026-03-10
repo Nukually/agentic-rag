@@ -3,7 +3,9 @@
 本项目是一个可运行的 **本地 Agentic RAG**（当前仅保留 CLI）：
 - 支持 `.txt/.md/.pdf` 入库与向量化检索/关键词索引
 - PDF 在文本提取之外，额外抽取表格并入库（可检索利润表/现金流量表等）
+- 查询改写（Query Rewrite）+ 多查询召回（Multi-Query Retrieval）
 - 混合检索（向量 + 关键词）+ 默认启用 reranker 重排
+- 支持“遗漏补全”追问（如“你漏掉了一些公司”会触发重新检索）
 - Agentic 工具链（`retrieve -> calculate / budget_analyst`）与轨迹输出
 - 内置反思循环：`reflect -> replan -> retry`（默认最多重试 1 次）
 - 执行阶段耗时反馈（route / plan / reflect / replan / tool / answer / total）
@@ -69,6 +71,9 @@ python3 -m pip install -r requirements.txt
 - `RETRIEVAL_CANDIDATE_K`（默认 `64`）
 - `HYBRID_VECTOR_WEIGHT`（默认 `0.6`）
 - `HYBRID_KEYWORD_WEIGHT`（默认 `0.4`）
+- `QUERY_REWRITE_ENABLED`（默认 `true`）
+- `MULTI_QUERY_ENABLED`（默认 `true`）
+- `MULTI_QUERY_COUNT`（默认 `3`）
 - `EMBEDDING_BATCH_SIZE`（默认 `64`）
 - `CHAT_HISTORY_MAX_MESSAGES`（默认 `80`）
 - `PLANNER_MAX_STEPS`（默认 `8`）
@@ -93,6 +98,11 @@ cp ~/docs/report.pdf knowledge/
 python3 scripts/ingest_once.py
 ```
 这一步会同时生成向量索引和 `data/processed/chunks.jsonl`，供关键词检索使用。
+
+如只新增/更新单个文件，可增量 upsert：
+```bash
+python3 scripts/ingest_once.py --file knowledge/xxx.pdf
+```
 
 ### 步骤 3：进入 CLI 对话
 方式一（推荐，自动走 conda 环境）：
@@ -148,8 +158,8 @@ python3 -m src.app.cli_chat --rebuild-index
 代码位置（可选）：
 `src/agent/planner.py`（路由逻辑）、`src/llm/prompts.py`（路由提示词）、`src/agent/graph.py`（分流后选择路径）
 
-### 4.2 混合检索与重排（retrieve）
-**功能**：先做向量检索 + 关键词检索，再合并成候选集，最后默认启用 rerank 重排。
+### 4.2 查询改写 + 多查询混合检索与重排（retrieve）
+**功能**：先进行 Query Rewrite，再做 Multi-Query 召回（每条 query 走向量检索 + 关键词检索），最后合并候选并启用 rerank 重排。
 
 示例问题：
 ```
@@ -162,8 +172,12 @@ python3 -m src.app.cli_chat --rebuild-index
 - rerank 信息（默认启用，未配置会自动降级）
 
 实现方式（怎么实现的）：
-- **向量召回**：把问题转成向量，在向量库里找最相近的片段。
-- **关键词召回**：用 BM25（基于词频的经典算法）在本地 chunks 里找“关键词匹配高”的片段。
+- **Query Rewrite**：先将用户问题改写成更适合检索的一条查询，保留实体、时间、指标、变量名。
+- **Multi-Query**：基于改写后的查询生成多个语义等价变体（默认 3 条），扩大召回覆盖面。
+- **向量召回**：每条 query 都转向量，在向量库里找最相近片段，并跨 query 聚合。
+- **关键词召回**：每条 query 都走 BM25，在本地 chunks 里找关键词匹配片段，并跨 query 聚合。
+- **Metadata 增强**：chunk 持久化 `doc_id/file_name/company_code/company_name/report_year/is_table` 等元数据。
+- **覆盖优先**：全局/补全类问题会按公司 metadata 做覆盖优先的结果选择，降低“只命中部分公司”概率。
 - **关键词数据来源**：chunks 来自 `scripts/ingest_once.py` 生成的 `data/processed/chunks.jsonl`。
 - **合并候选**：把两路结果按权重融合成一个候选池（权重默认 0.6 向量 / 0.4 关键词）。
 - **默认启用 rerank**：候选池交给重排模型做最终排序（配置好 `RERANKER_*` 就会生效）。
@@ -232,6 +246,7 @@ python3 -m src.app.cli_chat --rebuild-index
 - memory 就像一个小记事本，专门记住：上轮计算结果、提取的变量、检索到的片段。
 - 每个工具执行完都会返回一份“增量更新”，系统把这些更新合并进记事本。
 - 当你说“把上一步结果再乘以 0.1”，规划器会识别这是追问，就直接调用计算工具。
+- 当你说“你漏掉了一些公司”这类补全追问，规划器会基于上一轮问题自动触发一次“全覆盖”检索。
 
 代码位置（可选）：
 `src/agent/memory.py`、`src/agent/planner.py`
@@ -256,6 +271,7 @@ python3 -m src.app.cli_chat --rebuild-index
 ### 4.7 CLI 命令
 在对话中可使用：
 - `/rebuild`：重建索引
+- `/upsert <file>`：增量更新单个文件到索引（不全量重建）
 - `/reset`：清空会话 + memory
 - `/tools`：查看已注册工具
 - `/memory`：查看当前 memory 摘要
@@ -274,7 +290,7 @@ python3 -m src.app.cli_chat --rebuild-index
 
 ## 5. 脚本入口说明
 
-- `scripts/ingest_once.py`：构建索引
+- `scripts/ingest_once.py`：构建索引（支持 `--file` 增量 upsert）
 - `scripts/query_once.py`：单次 RAG 查询（含引用）
 - `scripts/agentic_query_once.py`：单次 Agentic 演示（含轨迹）
 - `scripts/rebuild_index.py`：仅重建索引

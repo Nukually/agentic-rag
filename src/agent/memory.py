@@ -1,3 +1,5 @@
+"""Conversation memory model shared across agent turns and tools."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -8,6 +10,12 @@ from src.agent.tools.rag_retrieve import RetrievedHit
 
 @dataclass
 class AgentMemory:
+    """Mutable memory snapshot used by planner, tools, and answer stage.
+
+    Stores cross-turn references, extracted variables, and latest tool outputs
+    so follow-up questions can reuse prior context.
+    """
+
     turn_count: int = 0
     last_question: str = ""
     last_answer: str = ""
@@ -26,6 +34,8 @@ class AgentMemory:
     last_reranker_message: str = ""
 
     def reset(self) -> None:
+        """Clear all memory fields to the initial empty state."""
+
         self.turn_count = 0
         self.last_question = ""
         self.last_answer = ""
@@ -40,6 +50,12 @@ class AgentMemory:
         self.last_reranker_message = ""
 
     def apply_delta(self, delta: dict[str, Any]) -> None:
+        """Merge one tool-produced memory delta into current memory.
+
+        Args:
+            delta: Partial memory update returned by a tool execution.
+        """
+
         for key, value in delta.items():
             if key == "variables" and isinstance(value, dict):
                 casted: dict[str, float] = {}
@@ -60,6 +76,8 @@ class AgentMemory:
                 setattr(self, key, value)
 
     def summarize(self) -> str:
+        """Return a compact one-line summary for planner prompts/debugging."""
+
         vars_text = ", ".join(f"{k}={v}" for k, v in sorted(self.variables.items()))
         if not vars_text:
             vars_text = "<none>"

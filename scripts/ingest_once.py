@@ -1,5 +1,8 @@
+"""One-shot script: ingest source docs and rebuild retrieval artifacts."""
+
 from __future__ import annotations
 
+import argparse
 import sys
 from pathlib import Path
 
@@ -15,17 +18,44 @@ from src.utils.config import load_config
 
 
 def main() -> None:
+    """Run full rebuild or incremental upsert and print summary stats.
+
+    Example:
+        $ python3 scripts/ingest_once.py
+        $ python3 scripts/ingest_once.py --file knowledge/a.pdf
+    """
+
+    parser = argparse.ArgumentParser(description="Build or upsert retrieval index")
+    parser.add_argument(
+        "--file",
+        action="append",
+        default=[],
+        help="Incrementally upsert one file (repeatable).",
+    )
+    args = parser.parse_args()
+
     config = load_config()
     ingest = IngestPipeline(chunk_size=config.chunk_size, chunk_overlap=config.chunk_overlap)
     clients = OpenAIClientBundle(config)
     store = MilvusVectorStore(uri=config.milvus_uri, collection_name=config.milvus_collection)
     indexer = RAGIndexer(ingest_pipeline=ingest, llm_clients=clients, vector_store=store)
 
-    stats = indexer.rebuild(config.raw_data_dir, config.processed_data_dir)
-    print(
-        f"[INFO] Done. files={stats.file_count} chunks={stats.chunk_count} "
-        f"dim={stats.embedding_dim} processed={stats.processed_file}"
-    )
+    if args.file:
+        stats = indexer.upsert_files(
+            file_paths=args.file,
+            processed_data_dir=config.processed_data_dir,
+            raw_data_dir=config.raw_data_dir,
+        )
+        print(
+            f"[INFO] Incremental upsert done. files={stats.file_count} chunks={stats.chunk_count} "
+            f"dim={stats.embedding_dim} processed={stats.processed_file}"
+        )
+    else:
+        stats = indexer.rebuild(config.raw_data_dir, config.processed_data_dir)
+        print(
+            f"[INFO] Full rebuild done. files={stats.file_count} chunks={stats.chunk_count} "
+            f"dim={stats.embedding_dim} processed={stats.processed_file}"
+        )
 
 
 if __name__ == "__main__":

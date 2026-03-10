@@ -1,3 +1,5 @@
+"""Prompt templates and prompt builder helpers used across the project."""
+
 RAG_SYSTEM_PROMPT = """你是一个严谨的 RAG 助手。
 请仅基于给定的检索上下文回答问题，禁止编造事实。
 如果上下文不足以回答，请明确说明“我在当前知识库中没有找到足够信息”。
@@ -32,8 +34,34 @@ AGENT_FINAL_SYSTEM_PROMPT = """你是一个严谨的 Agentic RAG 助手。
 禁止编造；若信息不足请明确说明。关键结论后标注引用 [ref:n]。
 """
 
+QUERY_REWRITE_SYSTEM_PROMPT = """你是检索查询改写助手。
+你的任务是把用户原问题改写为“更适合检索召回”的单条查询。
+要求：
+1) 保留原问题核心意图，不得改变语义。
+2) 保留关键实体、时间、指标、文件名、代码名、变量名。
+3) 输出 JSON：{"query":"..."}，不要输出其他文字。
+"""
+
+MULTI_QUERY_SYSTEM_PROMPT = """你是多查询召回助手。
+你的任务是基于给定查询，生成语义等价但表达不同的检索查询变体。
+要求：
+1) 不改变原意，不添加无关信息。
+2) 覆盖同义词、表达方式、可能的中英混写。
+3) 输出 JSON：{"queries":["q1","q2",...]}，不要输出其他文字。
+"""
+
 
 def build_user_prompt(question: str, contexts: list[dict[str, str]]) -> str:
+    """Build the classic RAG prompt with retrieved context blocks.
+
+    Args:
+        question: End-user question.
+        contexts: Retrieved snippets with `text/source/page`.
+
+    Returns:
+        str: Prompt text sent to the answer model.
+    """
+
     if not contexts:
         context_text = "<NO_CONTEXT>"
     else:
@@ -65,6 +93,8 @@ def build_agent_plan_prompt(
     previous_steps: list[object] | None = None,
     previous_observations: list[str] | None = None,
 ) -> str:
+    """Build the planning prompt used by the tool planner model."""
+
     recent_history = recent_history or []
     if not recent_history:
         history_text = "<none>"
@@ -108,6 +138,8 @@ def build_agent_plan_prompt(
 
 
 def build_agent_router_prompt(question: str) -> str:
+    """Build the router-classification prompt for a question."""
+
     return f"用户问题：{question}\n\n请输出类别名称。"
 
 
@@ -116,6 +148,8 @@ def build_agent_answer_prompt(
     tool_traces: list[object],
     contexts: list[dict[str, str]],
 ) -> str:
+    """Build the final-answer prompt from traces and retrieved contexts."""
+
     trace_lines: list[str] = []
     for step in tool_traces:
         idx = getattr(step, "step_no", "")
@@ -144,4 +178,22 @@ def build_agent_answer_prompt(
         f"用户问题：{question}\n\n"
         f"=== 工具执行轨迹 ===\n{trace_text}\n=== 轨迹结束 ===\n\n"
         f"=== 检索上下文 ===\n{ctx_text}\n=== 上下文结束 ==="
+    )
+
+
+def build_query_rewrite_prompt(query: str) -> str:
+    """Build a prompt asking the model to rewrite one retrieval query."""
+
+    return (
+        f"原始问题：{query}\n\n"
+        "请返回改写后的单条检索查询，仅输出 JSON。"
+    )
+
+
+def build_multi_query_prompt(query: str, count: int) -> str:
+    """Build a prompt asking the model for multiple retrieval variants."""
+
+    return (
+        f"基准查询：{query}\n\n"
+        f"请生成 {max(1, count)} 条语义等价的检索查询变体，仅输出 JSON。"
     )

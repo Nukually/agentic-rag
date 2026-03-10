@@ -1,3 +1,5 @@
+"""One-shot Agentic RAG query script with full tool trace output."""
+
 from __future__ import annotations
 
 import argparse
@@ -19,6 +21,12 @@ from src.utils.config import load_config
 
 
 def main() -> None:
+    """Run one question through the full agent runtime.
+
+    Example:
+        $ python3 scripts/agentic_query_once.py --question "Calculate A+B from doc"
+    """
+
     parser = argparse.ArgumentParser(description="One-shot agentic RAG query")
     parser.add_argument(
         "--question",
@@ -57,6 +65,9 @@ def main() -> None:
         keyword_index=keyword_index,
         hybrid_vector_weight=config.hybrid_vector_weight,
         hybrid_keyword_weight=config.hybrid_keyword_weight,
+        query_rewrite_enabled=config.query_rewrite_enabled,
+        multi_query_enabled=config.multi_query_enabled,
+        multi_query_count=config.multi_query_count,
         planner_max_steps=config.planner_max_steps,
         planner_history_window=config.planner_recent_history_messages,
         max_answer_contexts=config.answer_max_contexts,
