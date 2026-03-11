@@ -1,4 +1,4 @@
-"""Text chunking utilities for retrieval-oriented document segmentation."""
+"""具体的切块逻辑在这里。"""
 
 from __future__ import annotations
 

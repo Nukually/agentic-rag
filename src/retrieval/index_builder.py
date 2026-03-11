@@ -1,4 +1,4 @@
-"""Build vector and keyword-ready artifacts from raw knowledge documents."""
+"""indexing操作在这里"""
 
 from __future__ import annotations
 
@@ -55,16 +55,16 @@ class RAGIndexer:
         chunks = self.ingest_pipeline.build_chunks_for_files(files)
         if not chunks:
             raise ValueError(f"No chunks generated from directory: {raw_data_dir}")
-
+        # 调用embedding
         embeddings = self.llm_clients.embed_texts([chunk.text for chunk in chunks])
         if not embeddings:
             raise ValueError("Embedding API returned empty vectors")
 
         dim = len(embeddings[0])
-        self.vector_store.recreate(dimension=dim)
-        self.vector_store.insert_chunks(chunks, embeddings)
+        self.vector_store.recreate(dimension=dim)# 建立索引
+        self.vector_store.insert_chunks(chunks, embeddings)# 插入metadata
 
-        output_path = self.ingest_pipeline.dump_processed(chunks, processed_data_dir)
+        output_path = self.ingest_pipeline.dump_processed(chunks, processed_data_dir)#作为关键词检索索引的数据源
         return IndexStats(
             file_count=len(files),
             chunk_count=len(chunks),

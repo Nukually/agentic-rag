@@ -1,4 +1,4 @@
-"""End-to-end ingestion pipeline from files to structured chunk records."""
+"""入库流程"""
 
 from __future__ import annotations
 
@@ -59,27 +59,12 @@ class IngestPipeline:
         return sorted(files)
 
     def build_chunks(self, root_dir: str) -> list[ChunkRecord]:
-        """Parse all supported files and convert them into chunk records.
-
-        Args:
-            root_dir: Directory containing source documents.
-
-        Returns:
-            list[ChunkRecord]: Flattened chunk list across all files/pages.
-        """
+        """接口"""
 
         return self.build_chunks_for_files(self.discover_files(root_dir))
 
     def build_chunks_for_files(self, file_paths: list[Path]) -> list[ChunkRecord]:
-        """Parse the provided files and convert them into chunk records.
-
-        Args:
-            file_paths: Explicit file list to parse. Unsupported suffixes are
-                ignored.
-
-        Returns:
-            list[ChunkRecord]: Flattened chunk list across all files/pages.
-        """
+        """建立chunk"""
 
         chunks: list[ChunkRecord] = []
 

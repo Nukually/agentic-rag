@@ -1,4 +1,4 @@
-"""Router and planner logic for selecting and sequencing agent tools."""
+"""planning"""
 
 from __future__ import annotations
 
@@ -141,7 +141,7 @@ class AgentPlanner:
                 ],
                 temperature=0.0,
             )
-            return self._parse_steps(raw, memory=memory)
+            return self._parse_steps(raw, memory=memory, question=question)
         except Exception:
             return []
 
@@ -408,10 +408,29 @@ class AgentPlanner:
 
     @staticmethod
     def _is_budget_analysis_request(question: str) -> bool:
-        q = question.lower()
+        q = " ".join((question or "").strip().lower().split())
+        if not q:
+            return False
+
         has_budget = bool(re.search(r"(年度?预算|budget)", q))
-        has_rating = bool(re.search(r"(股价|price|评级|分析师|买入|卖出|增持|减持)", q))
-        return has_budget and has_rating
+        if not has_budget:
+            return False
+
+        has_price_target = bool(re.search(r"(股价|price|stock\s*price|股票|股市)", q))
+        has_rating_intent = bool(
+            re.search(r"(评级|rating|买入|卖出|增持|减持|中性|投资建议|recommend)", q)
+        )
+        has_explicit_budget_judgement = bool(
+            re.search(
+                r"((根据|基于|结合).{0,8}(预算|budget).{0,12}(分析|判断|评估))"
+                r"|((分析|判断|评估).{0,8}(股价|price|股票|评级).{0,12}(预算|budget))",
+                q,
+            )
+        )
+
+        # Only trigger the specialized tool when the user explicitly asks for
+        # budget-driven stock-price or rating judgement, not generic budget analysis.
+        return (has_price_target and has_rating_intent) or (has_explicit_budget_judgement and has_price_target)
 
     @staticmethod
     def _extract_variable_tokens(expression: str) -> list[str]:
@@ -560,7 +579,7 @@ class AgentPlanner:
             return "用户问题"
         return f"{base} 请覆盖所有公司并避免遗漏，按公司逐一给出依据"
 
-    def _parse_steps(self, raw: str, memory: AgentMemory | None) -> list[PlannedStep]:
+    def _parse_steps(self, raw: str, memory: AgentMemory | None, question: str) -> list[PlannedStep]:
         """Parse model JSON into validated, normalized planned steps."""
 
         payload = self._extract_json(raw)
@@ -580,6 +599,8 @@ class AgentPlanner:
                 continue
             if tool == "finish":
                 break
+            if tool == "budget_analyst" and not self._is_budget_analysis_request(question):
+                continue
             text = str(item.get("input", "")).strip()
             reason = str(item.get("reason", "")).strip()
             if not text:

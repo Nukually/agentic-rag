@@ -1,4 +1,4 @@
-"""Milvus-backed vector store adapter for chunk retrieval."""
+"""封装所有向量数据库的操作"""
 
 from __future__ import annotations
 
@@ -67,7 +67,7 @@ class MilvusVectorStore:
             return 0
 
     def recreate(self, dimension: int) -> None:
-        """Drop and recreate the collection with the given vector dimension."""
+        """用新的向量维度重建索引"""
 
         if self.has_collection():
             self.client.drop_collection(collection_name=self.collection_name)
@@ -82,7 +82,7 @@ class MilvusVectorStore:
         self._ensure_supported_index()
 
     def insert_chunks(self, chunks: list[ChunkRecord], embeddings: list[list[float]]) -> None:
-        """Insert chunk payloads and aligned embeddings into the collection."""
+        """插入chunk的metadata到数据库里"""
 
         if len(chunks) != len(embeddings):
             raise ValueError("chunks and embeddings length mismatch")
@@ -233,7 +233,7 @@ class MilvusVectorStore:
         return hits
 
     def _ensure_supported_index(self) -> None:
-        """Create a supported index type for local Milvus mode.
+        """建立索引：
 
         Priority:
         1) IVF_FLAT (tunable by nlist/nprobe)

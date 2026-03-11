@@ -87,7 +87,7 @@ def retrieve_hits(
     parallel_enabled: bool = True,
     parallel_max_workers: int = 8,
 ) -> RetrievalResult:
-    """Retrieve and rank document chunks for a query.
+    """真正的检索逻辑在这里！
 
     Args:
         query: User query text.
@@ -294,7 +294,7 @@ def _collect_hit_batches(
     parallel_enabled: bool,
     parallel_max_workers: int,
 ) -> tuple[list[list[SearchHit]], list[list[SearchHit]]]:
-    """Collect vector/keyword hit batches for all query variants.
+    """query做嵌入后去查询数据库
 
     Implementation notes:
     - Query embeddings are computed in one batch request to reduce overhead.
@@ -401,7 +401,7 @@ def _search_one_query(
     keyword_index: KeywordIndex | None,
     fetch_k: int,
 ) -> tuple[list[SearchHit], list[SearchHit]]:
-    """Run one retrieval branch (dense + optional keyword) for one query."""
+    """查询方法"""
 
     vector_hits = vector_store.search(query_vector=query_vector, top_k=fetch_k)
     if keyword_index is None:

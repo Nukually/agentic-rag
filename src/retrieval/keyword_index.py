@@ -1,4 +1,4 @@
-"""BM25-style keyword index built from processed chunk JSONL."""
+"""BM25相关实现与调用，读取chunk，分词，建立倒排索引，计算IDF并返回topk"""
 
 from __future__ import annotations
 

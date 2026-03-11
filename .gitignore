@@ -6,3 +6,4 @@ __pycache__/
 data/index/*.db
 data/processed/*.jsonl
 knowledge/
+docs/project_flow_breakdown.md

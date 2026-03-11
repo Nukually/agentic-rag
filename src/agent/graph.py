@@ -1,4 +1,4 @@
-"""Agent execution runtime: route, plan, execute tools, reflect, and answer."""
+"""整个的agent流程"""
 
 from __future__ import annotations
 
@@ -131,7 +131,7 @@ class AgentExecutor:
         """Execute one full agent run and return answer, refs, traces, timings.
 
         Args:
-            question: User question for this turn.
+            question: 用户输入
             history: Prior conversation messages in chat format.
 
         Returns:

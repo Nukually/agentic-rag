@@ -1,4 +1,4 @@
-"""Parse text/PDF files into normalized units for chunking and indexing."""
+"""pdf在chunking前的预处理（解析）"""
 
 from __future__ import annotations
 
