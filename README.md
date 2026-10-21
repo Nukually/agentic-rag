@@ -5,15 +5,15 @@
 - 语义去重：目前只做基于 chunk 键的去重，未做语义级去重
 - 长期 Memory：目前只有进程内 / 会话内 memory，未做持久化长期记忆
 - 多模态：目前以文本和 PDF 文本/表格抽取为主，未做图像/图表多模态理解
-- 评估模块：目前缺少系统化的 retrieval / answer / tool-use 评估闭环
-- 结构化 Chunk：目前仍是固定字符窗口切块，未做标题/段落/表格感知切块
+- 效果评估：已支持离线文档检索指标；仍需真实语料标注集、answer / tool-use 评估及检索消融实验
+- 结构化 Chunk：已支持段落、标题、表格行和代码围栏；尚未实现跨块表头复制、完整 Markdown AST 或父子块检索
 - 知识图谱：目前缺少跨文档实体关系建模，难以稳定检索文档之间的关系
 
 本项目是一个可运行的 **本地 Agentic RAG**（当前仅保留 CLI）：
 - 支持 `.txt/.md/.pdf` 入库与向量化检索/关键词索引
 - PDF 在文本提取之外，额外抽取表格并入库（可检索利润表/现金流量表等）
 - 查询改写（Query Rewrite）+ 多查询召回（Multi-Query Retrieval）
-- 混合检索（向量 + 关键词）+ 默认启用 reranker 重排
+- 混合检索（向量 + 关键词，使用 weighted RRF 融合）+ 默认启用 reranker 重排
 - 支持“遗漏补全”追问（如“你漏掉了一些公司”会触发重新检索）
 - Agentic 工具链（`retrieve -> calculate / budget_analyst`）与轨迹输出
 - 内置反思循环：`reflect -> replan -> retry`（默认最多重试 1 次）
@@ -188,7 +188,7 @@ python3 -m src.app.cli_chat --rebuild-index
 - **Metadata 增强**：chunk 持久化 `doc_id/file_name/company_code/company_name/report_year/is_table` 等元数据。
 - **覆盖优先**：全局/补全类问题会按公司 metadata 做覆盖优先的结果选择，降低“只命中部分公司”概率。
 - **关键词数据来源**：chunks 来自 `scripts/ingest_once.py` 生成的 `data/processed/chunks.jsonl`。
-- **合并候选**：把两路结果按权重融合成一个候选池（权重默认 0.6 向量 / 0.4 关键词）。
+- **合并候选**：对每条查询分别排名，再按每种检索器的最佳名次进行 weighted RRF 融合（权重默认 0.6 向量 / 0.4 关键词，常数 60）；同一 chunk 在每种检索器中只贡献一次，避免 BM25 与余弦分数尺度影响排序。
 - **默认启用 rerank**：候选池交给重排模型做最终排序（配置好 `RERANKER_*` 就会生效）。
 - **写入 memory**：最终结果写入 memory，后续追问可以直接复用。
 
@@ -334,8 +334,78 @@ python3 scripts/query_once.py --question "这份文件主要讲什么？"
 
 ## 8. 近期更新（同步代码实现）
 
+- 按 WeKnora 的文档身份、结构切块和排名融合思路完成首轮改造，参考版本见下文。
+- 文档 ID 按源根目录下的规范化相对路径生成；内容 hash 与 chunk ID 单独存储，修复同名文件互相覆盖及 PDF 多个解析单元重复 chunk 序号的问题。
+- 检索失败或无命中后不再回退上一轮证据；新检索变量优先，保留显式 `LAST_RESULT` 计算追问。
+- 修复千分位数字解析、连续 `LAST_RESULT` 追问，以及 `finish` 跳过失败检查的问题。
+- 新增离线检索评估 CLI、回归测试和 GitHub Actions；合成样例只验证算分流程。
 - 新增执行期反思循环：`reflect -> replan -> retry`。
 - 修复高风险问题：工具异常不再直接中断整次运行，改为观测并交给反思重试。
 - 修复中风险问题：`finish` 作为控制信号处理，不再误报 `tool_not_registered`。
 - 修复中风险问题：Router 分类解析增加规范化和否定词规避（如“这不是闲聊”“不需要查询知识库”）。
 - 修复中风险问题：知识库路由下空计划会触发补救重规划，避免直接无依据回答。
+
+## 9. 本轮改造与验证
+
+### 索引升级
+
+旧索引缺少新版文档与分块身份，不能和新数据混写。升级后先全量重建：
+
+```bash
+python3 scripts/ingest_once.py
+```
+
+该命令会替换配置中的 Milvus collection 和 `chunks.jsonl`，需要原始文档及 embedding 服务配置。增量更新继续使用：
+
+```bash
+python3 scripts/ingest_once.py --file knowledge/a.pdf
+```
+
+直接调用 `RAGIndexer.upsert_files` 时必须传 `raw_data_dir`，并与全量重建使用同一逻辑源根目录。ID 不包含文件内容：修改同一路径的文件会更新同一个文档；移动整个源目录但保持相对路径不会改变 ID；重命名文件视为新文档，旧条目需要全量重建清理。文件内容变化或切块文本/位置变化会改变 chunk ID。
+
+每个 chunk 保存 `doc_id`、`chunk_id`、`content_hash`、页码和 `start_offset/end_offset`。offset 相对当前解析单元的文本（PDF 页面文本或抽取表格），不是 PDF 文件字节位置。CLI 引用显示文档及 chunk ID。
+
+切块优先保持段落、标题、表格行和代码围栏完整；超长单元回退字符窗口。overlap 是上限，结构边界只复用能完整放下的尾部单元，实际重叠可能更少。标题处不带上一节内容。
+
+embedding 批次数量、维度及有限值会在替换数据前检查；向量维度变化要求重建；删除失败直接报错。关键词 JSONL 使用临时文件加原子替换。Milvus 与 JSONL 没有跨存储事务，本地索引按单写入者使用，外部写入故障后应全量重建，不能把这些检查视为双索引原子更新。
+
+### 检索与多轮上下文
+
+每份查询结果列表单独计算名次，每种检索器对同一 chunk 使用最佳名次。融合分数为 `sum(weight / (60 + rank))`，权重先归一化；`rrf_score` 不是相似度或相关性概率。多查询的完成顺序和 BM25 分数单位不会改变融合排名，reranker 仍在融合后执行。
+
+每次尝试检索先清空旧检索文本、旧引用和普通变量；失败或空结果不会重新启用它们。同一轮内多次检索仍会合并本轮成功获取的证据。无检索的计算追问可继续使用历史上下文，显式 `LAST_RESULT` 保存前次计算值。新文本中的同名普通变量优先于旧变量。
+
+### 自动化测试
+
+推荐 Python 3.11。在已安装项目运行依赖的环境中：
+
+```bash
+python3 -m pip install -r requirements-dev.txt
+python3 -m pytest -q
+```
+
+测试用合成文档、fake embedding、fake 向量库和 fake planner 验证真实切块、入库、检索融合及执行器，不调用模型 API 或数据库。GitHub Actions 运行相同测试。真实 embedding、Milvus 和 reranker 的集成效果需另外验证。
+
+### 离线检索评估
+
+```bash
+python3 scripts/evaluate_retrieval.py \
+  --cases eval/examples/cases.jsonl \
+  --results eval/examples/results.jsonl \
+  --k 2
+```
+
+`cases` 每行含 `id` 和 `relevant_doc_ids`，`results` 每行含同一 `id` 和按排名排列的 `retrieved_doc_ids`。用 CLI 引用中的实际 `doc_id` 标注证据，并从真实检索输出记录排名；不要直接把标准答案 ID 填成检索结果。失败检索显式记录空列表，缺失或多余 case、重复 ID 会报错。
+
+脚本按文档去重后取前 K 个，计算有正例问题的宏平均 Recall@K、MRR@K、nDCG@K。无答案问题单独统计，不混入正例均值。仓库中的三条合成案例仅演示输入格式和算分；其分数不代表当前模型或检索配置的效果。脚本不运行检索，也不评估最终答案事实性。
+
+### WeKnora 参考
+
+参考 [Tencent/WeKnora](https://github.com/Tencent/WeKnora/tree/e0c28bef3562de7d2d78d6c1fa480a045468a40f)，固定 commit 为 `e0c28bef3562de7d2d78d6c1fa480a045468a40f`。本轮保留 Python CLI，按以下设计重新实现，没有移植 Go 平台代码：
+
+- [文档创建](https://github.com/Tencent/WeKnora/blob/e0c28bef3562de7d2d78d6c1fa480a045468a40f/internal/application/service/knowledge_create.go)与[替换](https://github.com/Tencent/WeKnora/blob/e0c28bef3562de7d2d78d6c1fa480a045468a40f/internal/application/service/knowledge_replace.go)：源身份、内容版本及展示文件名分开。
+- [检索融合](https://github.com/Tencent/WeKnora/blob/e0c28bef3562de7d2d78d6c1fa480a045468a40f/internal/application/service/knowledgebase_search_fusion.go)：按独立结果列表的名次融合。
+- [标题切块](https://github.com/Tencent/WeKnora/blob/e0c28bef3562de7d2d78d6c1fa480a045468a40f/internal/infrastructure/chunker/heading_splitter.go)：结构分块并保留原文坐标。
+- [引用约束](https://github.com/Tencent/WeKnora/blob/e0c28bef3562de7d2d78d6c1fa480a045468a40f/internal/modelcontext/citations.go)与[评估类型](https://github.com/Tencent/WeKnora/blob/e0c28bef3562de7d2d78d6c1fa480a045468a40f/internal/types/evaluation.go)：区分当前证据与历史上下文，将检索指标和生成指标分开。
+
+本轮未加入 WeKnora 的 Web 管理端、Wiki、知识图谱、多租户、父子块/邻块扩展阅读或异步文档任务。

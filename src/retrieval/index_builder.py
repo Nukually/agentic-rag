@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,13 +53,11 @@ class RAGIndexer:
         """
 
         files = self.ingest_pipeline.discover_files(raw_data_dir)
-        chunks = self.ingest_pipeline.build_chunks_for_files(files)
+        chunks = self.ingest_pipeline.build_chunks_for_files(files, root_dir=raw_data_dir)
         if not chunks:
             raise ValueError(f"No chunks generated from directory: {raw_data_dir}")
         # 调用embedding
-        embeddings = self.llm_clients.embed_texts([chunk.text for chunk in chunks])
-        if not embeddings:
-            raise ValueError("Embedding API returned empty vectors")
+        embeddings = self._embed_chunks(chunks)
 
         dim = len(embeddings[0])
         self.vector_store.recreate(dimension=dim)# 建立索引
@@ -83,23 +82,24 @@ class RAGIndexer:
         Args:
             file_paths: Files to parse and upsert into indexes.
             processed_data_dir: Directory used to output `chunks.jsonl`.
-            raw_data_dir: Optional raw root used to resolve relative paths.
+            raw_data_dir: Required source root, shared with full rebuilds.
 
         Returns:
             IndexStats: File/chunk/dimension summary for this upsert run.
         """
 
+        if raw_data_dir is None:
+            raise ValueError("raw_data_dir is required for stable document identities")
         files = self._resolve_input_files(file_paths=file_paths, raw_data_dir=raw_data_dir)
         if not files:
             raise ValueError("No valid files to upsert")
 
-        chunks = self.ingest_pipeline.build_chunks_for_files(files)
+        existing_chunks = self._load_processed(processed_data_dir)
+        chunks = self.ingest_pipeline.build_chunks_for_files(files, root_dir=raw_data_dir)
         if not chunks:
             raise ValueError("No chunks generated from selected files")
 
-        embeddings = self.llm_clients.embed_texts([chunk.text for chunk in chunks])
-        if not embeddings:
-            raise ValueError("Embedding API returned empty vectors")
+        embeddings = self._embed_chunks(chunks)
 
         dim = len(embeddings[0])
         self.vector_store.ensure_collection(dimension=dim)
@@ -108,7 +108,8 @@ class RAGIndexer:
         self.vector_store.delete_by_doc_ids(doc_ids)
         self.vector_store.insert_chunks(chunks, embeddings)
 
-        output_path = self._upsert_processed(chunks=chunks, output_dir=processed_data_dir, remove_doc_ids=doc_ids)
+        kept_chunks = [chunk for chunk in existing_chunks if chunk.doc_id not in doc_ids]
+        output_path = self.ingest_pipeline.dump_processed(kept_chunks + chunks, processed_data_dir)
         return IndexStats(
             file_count=len(files),
             chunk_count=len(chunks),
@@ -124,17 +125,17 @@ class RAGIndexer:
         seen: set[Path] = set()
 
         for raw_path in file_paths:
-            candidate = Path(str(raw_path).strip())
-            if not candidate:
+            if not str(raw_path).strip():
                 continue
+            candidate = Path(str(raw_path).strip()).expanduser()
 
             choices: list[Path] = []
             if candidate.is_absolute():
                 choices.append(candidate)
             else:
-                choices.append(candidate)
                 if raw_root is not None:
                     choices.append(raw_root / candidate)
+                choices.append(candidate)
 
             picked: Path | None = None
             for path in choices:
@@ -149,51 +150,37 @@ class RAGIndexer:
             if normalized in seen:
                 continue
             seen.add(normalized)
-            resolved.append(picked)
+            if raw_root is not None and not normalized.is_relative_to(raw_root):
+                raise ValueError(f"File is outside raw_data_dir: {raw_path}")
+            resolved.append(normalized)
 
         return resolved
 
-    def _upsert_processed(self, chunks: list[ChunkRecord], output_dir: str, remove_doc_ids: list[str]) -> Path:
-        """Upsert chunks into `chunks.jsonl` by replacing rows with same `doc_id`."""
+    def _embed_chunks(self, chunks: list[ChunkRecord]) -> list[list[float]]:
+        """Validate the complete batch before replacing any indexed rows."""
 
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        jsonl_path = output_path / "chunks.jsonl"
+        embeddings = self.llm_clients.embed_texts([chunk.text for chunk in chunks])
+        if len(embeddings) != len(chunks) or not embeddings or not embeddings[0]:
+            raise ValueError("Invalid embedding count or empty vectors")
+        dimension = len(embeddings[0])
+        if any(len(vector) != dimension or any(not isinstance(v, (int, float)) or not math.isfinite(v) for v in vector) for vector in embeddings):
+            raise ValueError("Invalid embedding dimensions or non-finite values")
+        return embeddings
 
-        remove_ids = {doc_id for doc_id in remove_doc_ids if doc_id}
-        existing_rows: list[dict] = []
-        if jsonl_path.exists():
-            with jsonl_path.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        row = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    doc_id = str(row.get("doc_id", ""))
-                    if doc_id and doc_id in remove_ids:
-                        continue
-                    existing_rows.append(row)
-
-        with jsonl_path.open("w", encoding="utf-8") as f:
-            for row in existing_rows:
-                f.write(json.dumps(row, ensure_ascii=False) + "\n")
-            for chunk in chunks:
-                payload = {
-                    "text": chunk.text,
-                    "source": chunk.source,
-                    "page": chunk.page,
-                    "chunk_index": chunk.chunk_index,
-                    "doc_id": chunk.doc_id,
-                    "file_name": chunk.file_name,
-                    "source_type": chunk.source_type,
-                    "company_code": chunk.company_code,
-                    "company_name": chunk.company_name,
-                    "report_year": chunk.report_year,
-                    "is_table": chunk.is_table,
-                }
-                f.write(json.dumps(payload, ensure_ascii=False) + "\n")
-
-        return jsonl_path
+    @staticmethod
+    def _load_processed(output_dir: str) -> list[ChunkRecord]:
+        path = Path(output_dir) / "chunks.jsonl"
+        if not path.exists():
+            return []
+        chunks: list[ChunkRecord] = []
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if not line.strip():
+                    continue
+                chunk = ChunkRecord(**json.loads(line))
+                if not chunk.doc_id.startswith("doc_") or not chunk.chunk_id or not chunk.content_hash:
+                    raise ValueError("legacy chunk metadata")
+                chunks.append(chunk)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Legacy or invalid chunk index; run a full rebuild before incremental updates") from exc
+        return chunks

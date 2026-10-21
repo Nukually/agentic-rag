@@ -38,6 +38,10 @@ class KeywordDoc:
     company_name: str
     report_year: int | None
     is_table: bool
+    chunk_id: str = ""
+    content_hash: str = ""
+    start_offset: int = 0
+    end_offset: int = 0
 
 
 class KeywordIndex:
@@ -96,6 +100,10 @@ class KeywordIndex:
                         company_name=str(raw.get("company_name", "")),
                         report_year=_to_int_or_none(raw.get("report_year")),
                         is_table=bool(raw.get("is_table", False)),
+                        chunk_id=str(raw.get("chunk_id", "")),
+                        content_hash=str(raw.get("content_hash", "")),
+                        start_offset=int(raw.get("start_offset", 0) or 0),
+                        end_offset=int(raw.get("end_offset", 0) or 0),
                     )
                 )
 
@@ -163,6 +171,10 @@ class KeywordIndex:
                     company_name=doc.company_name,
                     report_year=doc.report_year,
                     is_table=doc.is_table,
+                    chunk_id=doc.chunk_id,
+                    content_hash=doc.content_hash,
+                    start_offset=doc.start_offset,
+                    end_offset=doc.end_offset,
                 )
             )
         return hits

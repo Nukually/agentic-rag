@@ -155,6 +155,7 @@ class AgentExecutor:
         reranker_message = self.memory.last_reranker_message or "no retrieval"
 
         run_state: dict[str, object] = {}
+        used_history_context = False
         last_steps: list[PlannedStep] = []
         last_observations: list[str] = []
         replan_feedback: str | None = None
@@ -197,6 +198,18 @@ class AgentExecutor:
                     traces.append(trace)
                     self._emit_progress("tool", step_elapsed_ms, f"round={round_no} step={i} tool={step.tool}")
                     break
+
+                if step.tool == "retrieve":
+                    # A fresh lookup must not inherit evidence or ordinary variables from a prior lookup.
+                    run_state["retrieval_attempted"] = True
+                    run_state["latest_retrieval_text"] = ""
+                    self.memory.last_retrieval_text = ""
+                    self.memory.last_references = []
+                    self.memory.variables.clear()
+                    reranker_applied = False
+                    reranker_message = "retrieval unavailable"
+                    self.memory.last_reranker_applied = False
+                    self.memory.last_reranker_message = reranker_message
 
                 if not self.registry.has(step.tool):
                     step_elapsed_ms = (perf_counter() - step_started) * 1000.0
@@ -275,6 +288,14 @@ class AgentExecutor:
                 self._emit_progress("tool", step_elapsed_ms, f"round={round_no} step={i} tool={step.tool}")
 
                 references = self._merge_references(references, tool_output.references)
+                if step.tool == "calculate" and tool_output.metadata.get("used_history_context"):
+                    used_history_context = True
+                elif (
+                    step.tool == "budget_analyst"
+                    and self.memory.last_retrieval_text
+                    and tool_output.metadata.get("rating") not in (None, "无法评级")
+                ):
+                    used_history_context = True
                 self.memory.apply_delta(tool_output.memory_delta)
 
                 if "retrieval_text" in tool_output.metadata:
@@ -310,7 +331,13 @@ class AgentExecutor:
                 break
             replan_feedback = reflection.replan_feedback
 
-        if not references and self.memory.last_references:
+        if (
+            used_history_context
+            and route != "闲聊"
+            and not run_state.get("retrieval_attempted")
+            and not references
+            and self.memory.last_references
+        ):
             references = list(self.memory.last_references)
 
         if route == "闲聊":
@@ -384,13 +411,6 @@ class AgentExecutor:
                 replan_feedback="",
             )
 
-        if any(step.tool == "finish" for step in planned_steps):
-            return ReflectionDecision(
-                should_retry=False,
-                reason="planner requested finish",
-                replan_feedback="",
-            )
-
         tool_missing = any(
             "tool_not_registered" in step.observation or "tool_not_found" in step.observation
             for step in round_traces
@@ -442,6 +462,15 @@ class AgentExecutor:
                     ),
                 )
 
+            return ReflectionDecision(
+                should_retry=True,
+                reason="calculate runtime error",
+                replan_feedback=(
+                    f"上一次计算失败：{calc_failures[0]}。"
+                    "请检查计算表达式和变量，避免重复失败的计算。"
+                ),
+            )
+
         retrieve_no_hits = any(
             step.tool == "retrieve" and step.observation.strip() == "no hits"
             for step in round_traces
@@ -454,6 +483,13 @@ class AgentExecutor:
                     "上一次 retrieve 无命中。"
                     "请重规划并优先用更贴近用户问题的检索步骤。"
                 ),
+            )
+
+        if any(step.tool == "finish" for step in planned_steps):
+            return ReflectionDecision(
+                should_retry=False,
+                reason="planner requested finish",
+                replan_feedback="",
             )
 
         if route == "需要查询知识库" and not references:
@@ -500,6 +536,8 @@ class AgentExecutor:
                 "text": self._truncate_context_text(hit.text, self.answer_context_char_limit),
                 "source": hit.source,
                 "page": str(hit.page),
+                "doc_id": hit.doc_id,
+                "chunk_id": hit.chunk_id,
             }
             for hit in references[: self.max_answer_contexts]
         ]
@@ -548,9 +586,9 @@ class AgentExecutor:
         """Merge and de-duplicate references from multiple tool outputs."""
 
         merged = list(current)
-        seen = {(item.source, item.page, item.text[:120]) for item in current}
+        seen = {item.chunk_id or (item.source, item.page, item.text) for item in current}
         for hit in incoming:
-            key = (hit.source, hit.page, hit.text[:120])
+            key = hit.chunk_id or (hit.source, hit.page, hit.text)
             if key in seen:
                 continue
             seen.add(key)

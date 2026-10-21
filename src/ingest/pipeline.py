@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import json
+import hashlib
+import os
 import re
+import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -26,6 +29,10 @@ class ChunkRecord:
     company_name: str = ""
     report_year: int | None = None
     is_table: bool = False
+    chunk_id: str = ""
+    content_hash: str = ""
+    start_offset: int = 0
+    end_offset: int = 0
 
 
 class IngestPipeline:
@@ -61,9 +68,9 @@ class IngestPipeline:
     def build_chunks(self, root_dir: str) -> list[ChunkRecord]:
         """接口"""
 
-        return self.build_chunks_for_files(self.discover_files(root_dir))
+        return self.build_chunks_for_files(self.discover_files(root_dir), root_dir=root_dir)
 
-    def build_chunks_for_files(self, file_paths: list[Path]) -> list[ChunkRecord]:
+    def build_chunks_for_files(self, file_paths: list[Path], root_dir: str | None = None) -> list[ChunkRecord]:
         """建立chunk"""
 
         chunks: list[ChunkRecord] = []
@@ -71,17 +78,20 @@ class IngestPipeline:
         for file_path in file_paths:
             if file_path.suffix.lower() not in SUPPORTED_SUFFIXES:
                 continue
+            content_hash = hashlib.sha256(file_path.read_bytes()).hexdigest()
+            chunk_index = 0
             parsed_units = parse_document(str(file_path))
             for unit in parsed_units:
-                unit_metadata = self._extract_unit_metadata(source=unit.source, text=unit.text)
+                unit_metadata = self._extract_unit_metadata(source=unit.source, text=unit.text, root_dir=root_dir)
                 piece_list = split_text(unit.text, self.chunk_size, self.chunk_overlap)
-                for idx, piece in enumerate(piece_list):
+                for piece in piece_list:
+                    identity = f"{unit_metadata['doc_id']}:{content_hash}:{chunk_index}:{piece.start}:{piece.end}:{piece.text}"
                     chunks.append(
                         ChunkRecord(
                             text=piece.text,
                             source=unit.source,
                             page=unit.page,
-                            chunk_index=idx,
+                            chunk_index=chunk_index,
                             doc_id=unit_metadata["doc_id"],
                             file_name=unit_metadata["file_name"],
                             source_type=unit_metadata["source_type"],
@@ -89,8 +99,13 @@ class IngestPipeline:
                             company_name=unit_metadata["company_name"],
                             report_year=unit_metadata["report_year"],
                             is_table=unit_metadata["is_table"],
+                            chunk_id="chunk_" + hashlib.sha256(identity.encode()).hexdigest()[:24],
+                            content_hash=content_hash,
+                            start_offset=piece.start,
+                            end_offset=piece.end,
                         )
                     )
+                    chunk_index += 1
 
         return chunks
 
@@ -109,20 +124,29 @@ class IngestPipeline:
         path.mkdir(parents=True, exist_ok=True)
         out_file = path / "chunks.jsonl"
 
-        with out_file.open("w", encoding="utf-8") as f:
-            for chunk in chunks:
-                f.write(json.dumps(asdict(chunk), ensure_ascii=False) + "\n")
+        fd, temporary = tempfile.mkstemp(dir=path, prefix=".chunks-", suffix=".jsonl")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                for chunk in chunks:
+                    f.write(json.dumps(asdict(chunk), ensure_ascii=False) + "\n")
+            os.replace(temporary, out_file)
+        finally:
+            Path(temporary).unlink(missing_ok=True)
 
         return out_file
 
     @staticmethod
-    def _extract_unit_metadata(source: str, text: str) -> dict[str, object]:
+    def _extract_unit_metadata(source: str, text: str, root_dir: str | None = None) -> dict[str, object]:
         """Extract lightweight retrieval metadata from source path and unit text."""
 
         path = Path(source)
         stem = path.stem
         file_name = path.name
         source_type = path.suffix.lower().lstrip(".")
+        identity_path = path.expanduser().resolve()
+        if root_dir is not None:
+            identity_path = identity_path.relative_to(Path(root_dir).expanduser().resolve())
+        doc_id = "doc_" + hashlib.sha256(identity_path.as_posix().encode()).hexdigest()[:24]
 
         company_code_match = re.search(r"(?<!\d)(\d{6})(?!\d)", stem)
         company_code = company_code_match.group(1) if company_code_match else ""
@@ -141,7 +165,7 @@ class IngestPipeline:
         is_table = normalized_text.startswith("[TABLE ")
 
         return {
-            "doc_id": stem,
+            "doc_id": doc_id,
             "file_name": file_name,
             "source_type": source_type,
             "company_code": company_code,

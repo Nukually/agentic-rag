@@ -70,7 +70,9 @@ def build_user_prompt(question: str, contexts: list[dict[str, str]]) -> str:
             blocks.append(
                 "\n".join(
                     [
-                        f"[ref:{i}] source={item['source']} page={item['page']}",
+                        f"[ref:{i}] source={item['source']} page={item['page']}"
+                        + (f" doc_id={item['doc_id']}" if item.get("doc_id") else "")
+                        + (f" chunk_id={item['chunk_id']}" if item.get("chunk_id") else ""),
                         item["text"],
                     ]
                 )
@@ -167,7 +169,9 @@ def build_agent_answer_prompt(
             blocks.append(
                 "\n".join(
                     [
-                        f"[ref:{i}] source={item['source']} page={item['page']}",
+                        f"[ref:{i}] source={item['source']} page={item['page']}"
+                        + (f" doc_id={item['doc_id']}" if item.get("doc_id") else "")
+                        + (f" chunk_id={item['chunk_id']}" if item.get("chunk_id") else ""),
                         item["text"],
                     ]
                 )

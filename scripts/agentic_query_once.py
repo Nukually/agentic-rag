@@ -97,8 +97,8 @@ def main() -> None:
         if hit.rerank_score is not None:
             score_name = "r_score"
         else:
-            score_name = "h_score" if keyword_index is not None else "v_score"
-        print(f"[ref:{i}] {hit.source} page={hit.page} {score_name}={score:.4f}")
+            score_name = "rrf_score"
+        print(f"[ref:{i}] {hit.source} page={hit.page} doc_id={hit.doc_id} chunk_id={hit.chunk_id} {score_name}={score:.4f}")
 
     print("\n=== Memory Summary ===")
     print(result.memory_summary)

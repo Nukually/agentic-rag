@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from pymilvus import MilvusClient
@@ -25,6 +25,10 @@ class SearchHit:
     company_name: str = ""
     report_year: int | None = None
     is_table: bool = False
+    chunk_id: str = ""
+    content_hash: str = ""
+    start_offset: int = 0
+    end_offset: int = 0
 
 
 class MilvusVectorStore:
@@ -89,22 +93,7 @@ class MilvusVectorStore:
 
         data: list[dict[str, Any]] = []
         for chunk, vector in zip(chunks, embeddings):
-            data.append(
-                {
-                    "vector": vector,
-                    "text": chunk.text,
-                    "source": chunk.source,
-                    "page": chunk.page,
-                    "chunk_index": chunk.chunk_index,
-                    "doc_id": chunk.doc_id,
-                    "file_name": chunk.file_name,
-                    "source_type": chunk.source_type,
-                    "company_code": chunk.company_code,
-                    "company_name": chunk.company_name,
-                    "report_year": chunk.report_year,
-                    "is_table": chunk.is_table,
-                }
-            )
+            data.append({**asdict(chunk), "vector": vector})
 
         if data:
             self.client.insert(collection_name=self.collection_name, data=data)
@@ -113,6 +102,11 @@ class MilvusVectorStore:
         """Create collection if absent; keep existing collection untouched."""
 
         if self.has_collection():
+            description = self.client.describe_collection(collection_name=self.collection_name)
+            fields = description.get("fields", [])
+            stored_dim = next((field.get("params", {}).get("dim") for field in fields if field.get("name") == "vector"), None)
+            if stored_dim is None or int(stored_dim) != dimension:
+                raise ValueError("Embedding dimension differs from collection; run a full rebuild")
             self._ensure_supported_index()
             return
         self.recreate(dimension=dimension)
@@ -127,13 +121,10 @@ class MilvusVectorStore:
         deleted = 0
         for doc_id in unique_ids:
             filter_value = _escape_filter_value(doc_id)
-            try:
-                result = self.client.delete(
-                    collection_name=self.collection_name,
-                    filter=f'doc_id == "{filter_value}"',
-                )
-            except Exception:
-                continue
+            result = self.client.delete(
+                collection_name=self.collection_name,
+                filter=f'doc_id == "{filter_value}"',
+            )
             deleted += _extract_delete_count(result)
         return deleted
 
@@ -163,6 +154,10 @@ class MilvusVectorStore:
             "company_name",
             "report_year",
             "is_table",
+            "chunk_id",
+            "content_hash",
+            "start_offset",
+            "end_offset",
         ]
         search_params = self._build_search_params()
         try:
@@ -227,6 +222,10 @@ class MilvusVectorStore:
                     company_name=str(entity.get("company_name", "")),
                     report_year=_to_int_or_none(entity.get("report_year")),
                     is_table=bool(entity.get("is_table", False)),
+                    chunk_id=str(entity.get("chunk_id", "")),
+                    content_hash=str(entity.get("content_hash", "")),
+                    start_offset=int(entity.get("start_offset", 0) or 0),
+                    end_offset=int(entity.get("end_offset", 0) or 0),
                 )
             )
 

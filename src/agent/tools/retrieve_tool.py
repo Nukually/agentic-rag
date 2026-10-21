@@ -109,16 +109,16 @@ class RetrieveTool:
             if hit.rerank_score is not None:
                 score_name = "r_score"
             else:
-                score_name = "h_score" if retrieval.keyword_hits is not None else "v_score"
+                score_name = "rrf_score"
             snippet = " ".join(hit.text.split())[:120]
             company_marker = hit.company_code or hit.company_name
             if company_marker:
                 lines.append(
-                    f"[{i}] {hit.source} page={hit.page} company={company_marker} "
+                    f"[{i}] {hit.source} page={hit.page} doc_id={hit.doc_id} chunk_id={hit.chunk_id} company={company_marker} "
                     f"{score_name}={score:.4f} text={snippet}"
                 )
             else:
-                lines.append(f"[{i}] {hit.source} page={hit.page} {score_name}={score:.4f} text={snippet}")
+                lines.append(f"[{i}] {hit.source} page={hit.page} doc_id={hit.doc_id} chunk_id={hit.chunk_id} {score_name}={score:.4f} text={snippet}")
 
         return "\n".join(lines)
 

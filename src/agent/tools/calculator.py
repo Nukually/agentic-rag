@@ -52,7 +52,7 @@ class SafeCalculator:
         Args:
             expression: Arithmetic expression (e.g. `A + B - 3`).
             context_text: Retrieval text used for variable extraction.
-            additional_variables: Pre-supplied variables (e.g. memory values).
+            additional_variables: Fallback variables; current context values take priority.
 
         Returns:
             CalcResult: Normalized expression, numeric value, and variables.
@@ -67,13 +67,14 @@ class SafeCalculator:
         if not normalized:
             raise ValueError("empty expression")
 
-        variables = self.extract_variables(context_text)
+        variables: dict[str, float] = {}
         if additional_variables:
             for key, value in additional_variables.items():
                 try:
                     variables[str(key)] = float(value)
                 except (TypeError, ValueError):
                     continue
+        variables.update(self.extract_variables(context_text))
 
         value = self._eval_ast(normalized, variables)
         return CalcResult(expression=normalized, value=float(value), variables=dict(variables))
@@ -86,9 +87,13 @@ class SafeCalculator:
             return {}
 
         mapping: dict[str, float] = {}
-        for m in re.finditer(r"\b([A-Z_][A-Z0-9_]*)\b\s*(?:=|:|：)\s*(-?\d+(?:\.\d+)?)", text):
+        for m in re.finditer(
+            r"\b([A-Z_][A-Z0-9_]*)\b\s*(?:=|:|：)\s*"
+            r"(-?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?)(?!\d|[,.]\d)",
+            text,
+        ):
             key = m.group(1).strip()
-            value = float(m.group(2))
+            value = float(m.group(2).replace(",", ""))
             mapping[key] = value
         return mapping
 

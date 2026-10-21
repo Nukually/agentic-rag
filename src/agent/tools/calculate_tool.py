@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+
 from src.agent.tools.calculator import SafeCalculator
 from src.agent.tools.registry import ToolContext, ToolOutput
 
@@ -36,22 +38,23 @@ class CalculateTool:
         if not expression:
             return ToolOutput(observation="calc_failed: empty expression")
 
-        known_vars = dict(context.memory.variables)
-        if context.memory.last_calc_value is not None:
-            known_vars.setdefault("LAST_RESULT", float(context.memory.last_calc_value))
-
         retrieval_text = str(
-            context.run_state.get("latest_retrieval_text")
-            or context.memory.last_retrieval_text
+            context.run_state.get("latest_retrieval_text", context.memory.last_retrieval_text)
             or ""
         )
 
         try:
+            known_vars = dict(context.memory.variables)
+            known_vars.update(self.calculator.extract_variables(retrieval_text))
+            # LAST_RESULT is runtime state, never an assignment supplied by a document.
+            known_vars.pop("LAST_RESULT", None)
+            if context.memory.last_calc_value is not None:
+                known_vars["LAST_RESULT"] = float(context.memory.last_calc_value)
             calc = self.calculator.evaluate(
                 expression=expression,
-                context_text=retrieval_text,
                 additional_variables=known_vars,
             )
+            uses_variables = any(isinstance(node, ast.Name) for node in ast.walk(ast.parse(expression, mode="eval")))
             vars_text = ", ".join(f"{k}={v}" for k, v in sorted(calc.variables.items())) or "<none>"
             observation = f"expression={calc.expression}; value={calc.value}; vars={vars_text}"
             return ToolOutput(
@@ -65,6 +68,7 @@ class CalculateTool:
                 metadata={
                     "calc_value": calc.value,
                     "calc_expression": calc.expression,
+                    "used_history_context": uses_variables and "latest_retrieval_text" not in context.run_state,
                 },
             )
         except Exception as exc:

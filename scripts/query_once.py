@@ -68,7 +68,7 @@ def _show_retrieval(result: RetrievalResult) -> None:
     if not result.final_hits:
         print("(空)")
     for i, hit in enumerate(result.final_hits, start=1):
-        score_label = "h_score" if result.keyword_hits is not None else "v_score"
+        score_label = "rrf_score"
         rr = "-" if hit.rerank_score is None else f"{hit.rerank_score:.4f}"
         company = hit.company_code or hit.company_name or "-"
         print(
@@ -88,12 +88,12 @@ def _show_answer(answer: str, result: RetrievalResult) -> None:
         print("(空)")
         return
 
-    score_label = "h_score" if result.keyword_hits is not None else "v_score"
+    score_label = "rrf_score"
     for i, hit in enumerate(result.final_hits, start=1):
         rr = "-" if hit.rerank_score is None else f"{hit.rerank_score:.4f}"
         company = hit.company_code or hit.company_name or "-"
         print(
-            f"[ref:{i}] source={hit.source} page={hit.page} company={company} "
+            f"[ref:{i}] source={hit.source} page={hit.page} doc_id={hit.doc_id} chunk_id={hit.chunk_id} company={company} "
             f"r_score={rr} {score_label}={hit.vector_score:.4f}"
         )
 
@@ -152,7 +152,7 @@ def main() -> None:
     _show_retrieval(retrieval)
 
     contexts = [
-        {"text": hit.text, "source": hit.source, "page": str(hit.page)} for hit in retrieval.final_hits
+        {"text": hit.text, "source": hit.source, "page": str(hit.page), "doc_id": hit.doc_id, "chunk_id": hit.chunk_id} for hit in retrieval.final_hits
     ]
     prompt = build_user_prompt(args.question, contexts)
     answer = clients.chat(

@@ -81,6 +81,14 @@ def chat_loop() -> None:
         $ python -m src.app.cli_chat --rebuild-index
     """
 
+    parser = argparse.ArgumentParser(description="Minimal Agentic RAG CLI")
+    parser.add_argument(
+        "--rebuild-index",
+        action="store_true",
+        help="Rebuild index from RAW_DATA_DIR before starting chat",
+    )
+    args = parser.parse_args()
+
     config = load_config()
 
     def _on_progress(stage: str, elapsed_ms: float, detail: str) -> None:
@@ -120,13 +128,7 @@ def chat_loop() -> None:
         progress_callback=_on_progress,
     )
 
-    parser = argparse.ArgumentParser(description="Minimal Agentic RAG CLI")
-    parser.add_argument(
-        "--rebuild-index",
-        action="store_true",
-        help="Rebuild index from RAW_DATA_DIR before starting chat",
-    )
-    args = parser.parse_args()
+
 
     if args.rebuild_index:
         _build_index(indexer, config.raw_data_dir, config.processed_data_dir)
@@ -214,8 +216,8 @@ def chat_loop() -> None:
                 if hit.rerank_score is not None:
                     score_name = "r_score"
                 else:
-                    score_name = "h_score" if keyword_index is not None else "v_score"
-                print(f"  [ref:{i}] {hit.source} page={hit.page} {score_name}={ref_score:.4f}")
+                    score_name = "rrf_score"
+                print(f"  [ref:{i}] {hit.source} page={hit.page} doc_id={hit.doc_id} chunk_id={hit.chunk_id} {score_name}={ref_score:.4f}")
             print("")
 
         history.append({"role": "user", "content": user_text})

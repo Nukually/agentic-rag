@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
+import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Iterable
 
 from src.llm.client import OpenAIClientBundle
@@ -36,6 +37,10 @@ class RetrievedHit:
     company_name: str = ""
     report_year: int | None = None
     is_table: bool = False
+    chunk_id: str = ""
+    content_hash: str = ""
+    start_offset: int = 0
+    end_offset: int = 0
 
 
 @dataclass(frozen=True)
@@ -67,6 +72,10 @@ def _to_retrieved(hit: SearchHit, rerank_score: float | None = None) -> Retrieve
         company_name=hit.company_name,
         report_year=hit.report_year,
         is_table=hit.is_table,
+        chunk_id=hit.chunk_id,
+        content_hash=hit.content_hash,
+        start_offset=hit.start_offset,
+        end_offset=hit.end_offset,
     )
 
 
@@ -97,8 +106,8 @@ def retrieve_hits(
         top_k: Final result count.
         candidate_k: Candidate pool size before rerank.
         keyword_index: Optional BM25 index.
-        vector_weight: Weight for normalized vector score.
-        keyword_weight: Weight for normalized keyword score.
+        vector_weight: Weight for vector retrieval rank.
+        keyword_weight: Weight for keyword retrieval rank.
         query_rewrite_enabled: Whether to run query rewriting before retrieval.
         multi_query_enabled: Whether to generate additional query variants.
         multi_query_count: Number of query variants to use (including primary).
@@ -169,6 +178,8 @@ def retrieve_hits(
         vector_weight=vector_weight,
         keyword_weight=keyword_weight,
         top_k=candidate_k,
+        vector_hit_batches=vector_hit_batches,
+        keyword_hit_batches=keyword_hit_batches,
     )
     if not candidates:
         return RetrievalResult(
@@ -418,19 +429,7 @@ def _merge_query_hits(hit_batches: Iterable[list[SearchHit]], top_k: int) -> lis
             key = (hit.source, hit.page, hit.text)
             current = merged.get(key)
             if current is None or hit.score > current.score:
-                merged[key] = SearchHit(
-                    text=hit.text,
-                    source=hit.source,
-                    page=hit.page,
-                    score=float(hit.score),
-                    doc_id=hit.doc_id,
-                    file_name=hit.file_name,
-                    source_type=hit.source_type,
-                    company_code=hit.company_code,
-                    company_name=hit.company_name,
-                    report_year=hit.report_year,
-                    is_table=hit.is_table,
-                )
+                merged[key] = hit
 
     ranked = sorted(merged.values(), key=lambda item: item.score, reverse=True)
     return ranked[: max(1, top_k)]
@@ -544,78 +543,45 @@ def _merge_candidates(
     vector_weight: float,
     keyword_weight: float,
     top_k: int,
+    *,
+    vector_hit_batches: list[list[SearchHit]] | None = None,
+    keyword_hit_batches: list[list[SearchHit]] | None = None,
 ) -> list[SearchHit]:
-    """Merge dense and keyword candidates using normalized weighted scores."""
+    """Weighted reciprocal rank fusion; BM25 and cosine scores are not comparable.
 
-    vector_list = list(vector_hits)
-    keyword_list = list(keyword_hits)
-    if vector_list and not keyword_list:
-        return vector_list[: max(1, top_k)]
-    if keyword_list and not vector_list:
-        return keyword_list[: max(1, top_k)]
+    Each unique hit contributes weight / (60 + rank), with ranks starting at 1.
+    Query lists are ranked independently; each retriever contributes its best
+    rank for a chunk, once. Returned scores are fusion scores, not relevance
+    probabilities or cosine similarities.
+    """
 
-    total = vector_weight + keyword_weight
-    if total <= 0:
-        vector_weight, keyword_weight = 1.0, 0.0
-    else:
-        vector_weight /= total
-        keyword_weight /= total
-
-    entries: dict[tuple[str, int, str], dict[str, object]] = {}
-    for hit in vector_list:
-        key = (hit.source, hit.page, hit.text)
-        entries[key] = {"hit": hit, "v": hit.score, "k": 0.0}
-    for hit in keyword_list:
-        key = (hit.source, hit.page, hit.text)
-        if key in entries:
-            entries[key]["k"] = hit.score
-        else:
-            entries[key] = {"hit": hit, "v": 0.0, "k": hit.score}
-
-    if not entries:
+    if top_k <= 0:
         return []
-
-    v_norm = _normalize_scores((key, item["v"]) for key, item in entries.items())
-    k_norm = _normalize_scores((key, item["k"]) for key, item in entries.items())
-
-    scored: list[tuple[SearchHit, float]] = []
-    for key, item in entries.items():
-        combined = vector_weight * v_norm.get(key, 0.0) + keyword_weight * k_norm.get(key, 0.0)
-        scored.append((item["hit"], combined))
-
-    scored.sort(key=lambda x: x[1], reverse=True)
-    output: list[SearchHit] = []
-    for hit, score in scored[: max(1, top_k)]:
-        output.append(
-            SearchHit(
-                text=hit.text,
-                source=hit.source,
-                page=hit.page,
-                score=float(score),
-                doc_id=hit.doc_id,
-                file_name=hit.file_name,
-                source_type=hit.source_type,
-                company_code=hit.company_code,
-                company_name=hit.company_name,
-                report_year=hit.report_year,
-                is_table=hit.is_table,
-            )
-        )
-    return output
-
-
-def _normalize_scores(items: Iterable[tuple[tuple[str, int, str], float]]) -> dict[tuple[str, int, str], float]:
-    """Min-max normalize candidate scores into [0, 1] range."""
-
-    values = list(items)
-    if not values:
-        return {}
-    scores = [score for _, score in values]
-    min_score = min(scores)
-    max_score = max(scores)
-    if max_score <= min_score:
-        if max_score == 0.0:
-            return {key: 0.0 for key, _ in values}
-        return {key: 1.0 for key, _ in values}
-    span = max_score - min_score
-    return {key: (score - min_score) / span for key, score in values}
+    if any(not math.isfinite(w) or w < 0 for w in (vector_weight, keyword_weight)):
+        raise ValueError("Retrieval weights must be finite and non-negative")
+    total = vector_weight + keyword_weight
+    if total == 0:
+        vector_weight, keyword_weight, total = 1.0, 0.0, 1.0
+    entries: dict[tuple, SearchHit] = {}
+    scores: dict[tuple, float] = {}
+    branches = (
+        (vector_hit_batches if vector_hit_batches is not None else [vector_hits], vector_weight),
+        (keyword_hit_batches if keyword_hit_batches is not None else [keyword_hits], keyword_weight),
+    )
+    for batches, weight in branches:
+        if weight == 0:
+            continue
+        best_ranks: dict[tuple, int] = {}
+        for hits in batches:
+            seen: set[tuple] = set()
+            for hit in hits:
+                key = (hit.chunk_id,) if hit.chunk_id else (hit.source, hit.page, hit.text)
+                if key in seen:
+                    continue
+                seen.add(key)
+                entries.setdefault(key, hit)
+                best_ranks[key] = min(best_ranks.get(key, len(seen)), len(seen))
+        for key, rank in best_ranks.items():
+            scores[key] = scores.get(key, 0.0) + (weight / total) / (60 + rank)
+    ranked = sorted(entries, key=lambda key: (-scores[key], key))
+    return [replace(entries[key], score=scores[key]) for key in ranked[:top_k]]
