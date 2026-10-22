@@ -52,6 +52,10 @@ class MilvusVectorStore:
         self.ivf_nlist = max(1, int(ivf_nlist))
         self.ivf_nprobe = max(1, int(ivf_nprobe))
         self.index_type_in_use = "AUTOINDEX"
+        if self.has_collection():
+            self._ensure_supported_index()
+            # Persistent Milvus Lite collections reopen in the released state.
+            self.client.load_collection(collection_name=self.collection_name)
 
     def has_collection(self) -> bool:
         """Check whether the target collection exists."""
@@ -84,6 +88,7 @@ class MilvusVectorStore:
             consistency_level="Strong",
         )
         self._ensure_supported_index()
+        self.client.load_collection(collection_name=self.collection_name)
 
     def insert_chunks(self, chunks: list[ChunkRecord], embeddings: list[list[float]]) -> None:
         """插入chunk的metadata到数据库里"""
@@ -239,6 +244,12 @@ class MilvusVectorStore:
         2) AUTOINDEX
         3) FLAT
         """
+
+        for index_name in self.client.list_indexes(collection_name=self.collection_name):
+            existing = self.client.describe_index(collection_name=self.collection_name, index_name=index_name)
+            if existing.get("field_name") == "vector":
+                self.index_type_in_use = existing.get("index_type", "AUTOINDEX")
+                return
 
         candidates: list[tuple[str, dict[str, int]]] = [
             ("IVF_FLAT", {"nlist": self.ivf_nlist}),

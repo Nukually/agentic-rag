@@ -1,10 +1,12 @@
 .env
+.env.*
+!.env.example
 __pycache__/
 *.pyc
 .pytest_cache/
 
 # Local index artifacts
-data/index/*.db
-data/processed/*.jsonl
+data/index/
+data/processed/
 knowledge/
 docs/project_flow_breakdown.md

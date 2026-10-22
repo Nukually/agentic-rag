@@ -49,3 +49,28 @@ def test_chunk_provenance_survives_vector_search_fusion_and_rerank_conversion():
     merged = _merge_candidates(_merge_query_hits([[hit]], 1), [], 1, 0, 1)[0]
     final = _to_retrieved(merged, .95)
     assert (final.doc_id, final.chunk_id, final.content_hash, final.start_offset, final.end_offset) == ('doc_test', 'chunk_test', 'hash', 5, 19)
+
+
+def test_existing_vector_index_is_reused_without_recreation():
+    attempts = []
+
+    def create_index(**kwargs):
+        attempts.append(kwargs)
+        raise RuntimeError('index already exists')
+
+    subject = MilvusVectorStore.__new__(MilvusVectorStore)
+    subject.collection_name = 'test-chunks'
+    subject.ivf_nlist = 1024
+    subject.ivf_nprobe = 32
+    subject.index_type_in_use = 'AUTOINDEX'
+    subject.client = SimpleNamespace(
+        list_indexes=lambda **_: ['vector_index'],
+        describe_index=lambda **_: {'field_name':'vector', 'index_type':'IVF_FLAT'},
+        create_index=create_index,
+    )
+
+    subject._ensure_supported_index()
+
+    assert attempts == []
+    assert subject.index_type_in_use == 'IVF_FLAT'
+    assert subject._build_search_params()['params']['nprobe'] == 32
